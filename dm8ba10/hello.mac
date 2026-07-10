@@ -14,11 +14,11 @@ START:	MOV	#1000, SP	; stack below the code
 	MOV	#ON, R0		; backlight on (LED on PA3)
 	JSR	PC, LCDLED
 	MOV	#MSG, R0
-	MOV	#1, R1		; start at position 2 - roughly centered
+	MOV	#0, R1		; start at position 0
 	JSR	PC, LCDSTR
 	HALT
 
-MSG:	.ASCIZ	/HI GUYS!/
+MSG:	.ASCIZ	/HOLA MUNDO/
 	.EVEN
 
 	.INCLUDE /dm8ba10.mac/
