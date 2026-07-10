@@ -7,6 +7,7 @@
 ;	CS   - PA0
 ;	WR   - PA1
 ;	DATA - PA2
+;	LED  - PA3   (LCD backlight, active high; optional)
 ;
 ; API (all routines clobber R0-R3 unless noted):
 ;	LCDINI	initialize: port direction, oscillator on, clear, LCD on
@@ -15,10 +16,15 @@
 ;	LCDCHR	R0 = ASCII char,     R1 = position (preserved)
 ;	LCDWRD	R0 = 16-bit segment word, R1 = nibble address
 ;	LCDCMD	R0 = 8-bit HT1622 command
+;	LCDLED	R0 = 0 backlight off, non-zero backlight on
+;
+; The backlight bit shares port A with the serial lines, so every port
+; write ORs in LEDSTA - the shadow of the current backlight state. Never
+; write VIAORA directly without it.
 ;
 ; Positions run 0 (leftmost) to 9 (rightmost); digit at position P
 ; occupies nibble address (9-P)*4. The driver owns port A direction
-; (writes DDRA = 7; PA3-PA7 become inputs).
+; (writes DDRA = 17; PA4-PA7 become inputs).
 ;
 ; Protocol, addressing and the 16-segment font follow the DM8BA10
 ; Arduino library by Ilya 'road-t' Annikov (MIT):
@@ -32,11 +38,20 @@ VIADRA	= 174006		; VIA DDRA - direction, 1 bit = output
 LCDCS	= 1			; PA0: chip select, active low
 LCDWR	= 2			; PA1: write clock, data latched on rise
 LCDDA	= 4			; PA2: serial data
+LEDBIT	= 10			; PA3: backlight, active high
+
+LCDIDL	= LCDCS!LCDWR		; bus idle: CS high, WR high
+
+OFF	= 0			; argument values for LCDLED
+ON	= 1
 
 ; ---- initialize the panel -------------------------------------------
 
-LCDINI:	MOV	#7, @#VIADRA	; PA0-2 outputs
-	MOV	#LCDCS!LCDWR, @#VIAORA	; idle: CS high, WR high
+LCDINI:	MOV	#17, @#VIADRA	; PA0-3 outputs
+	CLR	LEDSTA		; backlight off until asked for
+	MOV	#LCDIDL, R0
+	BIS	LEDSTA, R0
+	MOV	R0, @#VIAORA	; idle: CS high, WR high
 	MOV	#1, R0		; SYS EN - oscillator on
 	JSR	PC, LCDCMD
 	JSR	PC, LCDCLR
@@ -91,7 +106,9 @@ LCDCH1:	ASL	R0
 ; stream: 101 + 6 address bits + 16 data bits, MSB first
 
 LCDWRD:	MOV	R0, -(SP)
-	MOV	#LCDWR, @#VIAORA	; CS low - begin transfer
+	MOV	#LCDWR, R0
+	BIS	LEDSTA, R0
+	MOV	R0, @#VIAORA	; CS low - begin transfer
 	MOV	R1, R2
 	SWAB	R2		; address << 8 ...
 	CLC
@@ -102,14 +119,18 @@ LCDWRD:	MOV	R0, -(SP)
 	MOV	(SP)+, R2	; 16 data bits
 	MOV	#^D16, R3
 	JSR	PC, SENDB
-	MOV	#LCDCS!LCDWR, @#VIAORA	; CS high - end
+	MOV	#LCDIDL, R0
+	BIS	LEDSTA, R0
+	MOV	R0, @#VIAORA	; CS high - end
 	RTS	PC
 
 ; ---- send 8-bit command R0 ------------------------------------------
 ; stream: 100 + 8 command bits + 1 pad bit, MSB first
 
-LCDCMD:	MOV	#LCDWR, @#VIAORA	; CS low
-	MOV	R0, R2
+LCDCMD:	MOV	R0, R2		; save the command
+	MOV	#LCDWR, R0
+	BIS	LEDSTA, R0
+	MOV	R0, @#VIAORA	; CS low
 	ASL	R2		; command << 5 into bits 12..5
 	ASL	R2
 	ASL	R2
@@ -119,7 +140,9 @@ LCDCMD:	MOV	#LCDWR, @#VIAORA	; CS low
 	BIS	#20, R2		; pad bit
 	MOV	#^D12, R3
 	JSR	PC, SENDB
-	MOV	#LCDCS!LCDWR, @#VIAORA	; CS high
+	MOV	#LCDIDL, R0
+	BIS	LEDSTA, R0
+	MOV	R0, @#VIAORA	; CS high
 	RTS	PC
 
 ; ---- clock out R3 bits of R2, MSB first -----------------------------
@@ -130,11 +153,30 @@ SENDB:	ASL	R2		; next bit into carry
 	MOV	#0, R0		; WR low, DATA 0 (MOV keeps carry)
 	BCC	SENDB1
 	MOV	#LCDDA, R0	; DATA 1
-SENDB1:	MOV	R0, @#VIAORA	; WR low, data valid
+SENDB1:	BIS	LEDSTA, R0	; keep the backlight as it is (BIS keeps carry)
+	MOV	R0, @#VIAORA	; WR low, data valid
 	BIS	#LCDWR, R0
 	MOV	R0, @#VIAORA	; WR rise latches the bit
 	SOB	R3, SENDB
 	RTS	PC
+
+; ---- backlight, R0 = ON or OFF --------------------------------------
+; safe between transfers only (it drives the idle bus state)
+
+LCDLED:	TST	R0
+	BEQ	LCDLE1
+	MOV	#LEDBIT, LEDSTA
+	BR	LCDLE2
+LCDLE1:	CLR	LEDSTA
+LCDLE2:	MOV	#LCDIDL, R0
+	BIS	LEDSTA, R0
+	MOV	R0, @#VIAORA
+	RTS	PC
+
+; ---- backlight state shadow (0 or LEDBIT) ---------------------------
+; every port A write ORs this in, so the serial traffic cannot blink it
+
+LEDSTA:	.WORD	0
 
 ; ---- 16-segment font, ASCII 040..0177 -------------------------------
 ; one word per glyph; bit assignment per the DM8BA10 segment map

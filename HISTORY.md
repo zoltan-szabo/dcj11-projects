@@ -3,6 +3,19 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## dm8ba10 backlight support (2026-07-10)
+
+The panel's LED backlight is wired to VIA PA3. Because the backlight bit
+shares port A with CS/WR/DATA, every port write in the driver now ORs in
+`LEDSTA`, a shadow word holding the current backlight state — otherwise
+each transmitted bit would blank the LED. `LCDINI` widens DDRA to 17
+(PA0-3 outputs) and starts with the backlight off; `LCDLED` (R0 = 0 off,
+`ON`/`OFF`) switches it and rewrites the idle bus state. `BIS` does not
+affect the carry flag, so the shadow OR is safe inside `SENDB`'s
+carry-driven bit loop. The Hello example switches the backlight on.
+
+Hardware-verified 2026-07-10: "Hello" displays on the panel.
+
 ## dm8ba10 driver and Hello example (2026-07-10)
 
 Driver for the eletechsup DM8BA10 panel (TM1622, HT1622-compatible
