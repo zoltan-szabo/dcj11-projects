@@ -1,0 +1,155 @@
+; dm8ba10.mac — driver for the DM8BA10 10-digit 16-segment LCD panel
+;
+; Panel: eletechsup DM8BA10, TM1622 controller (HT1622 compatible),
+; 3-wire serial: bits are latched on the WR rising edge.
+;
+; Wiring (W65C22S VIA on the Multi IO card, port A):
+;	CS   - PA0
+;	WR   - PA1
+;	DATA - PA2
+;
+; API (all routines clobber R0-R3 unless noted):
+;	LCDINI	initialize: port direction, oscillator on, clear, LCD on
+;	LCDCLR	blank the whole display (clobbers R0-R3 only)
+;	LCDSTR	R0 -> ASCIZ string, R1 = start position 0..9  (also R4)
+;	LCDCHR	R0 = ASCII char,     R1 = position (preserved)
+;	LCDWRD	R0 = 16-bit segment word, R1 = nibble address
+;	LCDCMD	R0 = 8-bit HT1622 command
+;
+; Positions run 0 (leftmost) to 9 (rightmost); digit at position P
+; occupies nibble address (9-P)*4. The driver owns port A direction
+; (writes DDRA = 7; PA3-PA7 become inputs).
+;
+; Protocol, addressing and the 16-segment font follow the DM8BA10
+; Arduino library by Ilya 'road-t' Annikov (MIT):
+;	https://github.com/road-t/DM8BA10
+; Runs on the DCJ-11 SBC + Multi IO card by Peter Schranz:
+;	https://www.5volts.ch/pages/dcj11sbc/
+
+VIAORA	= 174002		; VIA ORA/IRA - port A data
+VIADRA	= 174006		; VIA DDRA - direction, 1 bit = output
+
+LCDCS	= 1			; PA0: chip select, active low
+LCDWR	= 2			; PA1: write clock, data latched on rise
+LCDDA	= 4			; PA2: serial data
+
+; ---- initialize the panel -------------------------------------------
+
+LCDINI:	MOV	#7, @#VIADRA	; PA0-2 outputs
+	MOV	#LCDCS!LCDWR, @#VIAORA	; idle: CS high, WR high
+	MOV	#1, R0		; SYS EN - oscillator on
+	JSR	PC, LCDCMD
+	JSR	PC, LCDCLR
+	MOV	#3, R0		; LCD ON
+	JSR	PC, LCDCMD
+	RTS	PC
+
+; ---- blank all 64 RAM nibbles (digits and points) -------------------
+
+LCDCLR:	MOV	R5, -(SP)
+	CLR	R5
+LCDCL1:	MOV	R5, R1
+	CLR	R0
+	JSR	PC, LCDWRD
+	ADD	#4, R5
+	CMP	R5, #100
+	BLT	LCDCL1
+	MOV	(SP)+, R5
+	RTS	PC
+
+; ---- write ASCIZ string, R0 -> text, R1 = start position ------------
+
+LCDSTR:	MOV	R0, R4
+LCDST1:	MOVB	(R4)+, R0
+	BEQ	LCDST2
+	CMP	R1, #11		; past position 9?
+	BGT	LCDST2
+	JSR	PC, LCDCHR
+	INC	R1
+	BR	LCDST1
+LCDST2:	RTS	PC
+
+; ---- write one character, R0 = ASCII, R1 = position 0..9 ------------
+
+LCDCHR:	MOV	R1, -(SP)
+	SUB	#40, R0		; font starts at space
+	CMP	R0, #137	; printable range only
+	BLOS	LCDCH1
+	CLR	R0		; anything else shows as space
+LCDCH1:	ASL	R0
+	MOV	FONT(R0), R0
+	MOV	#11, R2		; address = (9 - position) * 4
+	SUB	R1, R2
+	ASL	R2
+	ASL	R2
+	MOV	R2, R1
+	JSR	PC, LCDWRD
+	MOV	(SP)+, R1
+	RTS	PC
+
+; ---- write 16-bit word R0 to nibble address R1 ----------------------
+; stream: 101 + 6 address bits + 16 data bits, MSB first
+
+LCDWRD:	MOV	R0, -(SP)
+	MOV	#LCDWR, @#VIAORA	; CS low - begin transfer
+	MOV	R1, R2
+	SWAB	R2		; address << 8 ...
+	CLC
+	ROR	R2		; ... >> 1 = address into bits 12..7
+	BIS	#120000, R2	; 101 prefix into bits 15..13
+	MOV	#^D9, R3	; 9 bits: prefix + address
+	JSR	PC, SENDB
+	MOV	(SP)+, R2	; 16 data bits
+	MOV	#^D16, R3
+	JSR	PC, SENDB
+	MOV	#LCDCS!LCDWR, @#VIAORA	; CS high - end
+	RTS	PC
+
+; ---- send 8-bit command R0 ------------------------------------------
+; stream: 100 + 8 command bits + 1 pad bit, MSB first
+
+LCDCMD:	MOV	#LCDWR, @#VIAORA	; CS low
+	MOV	R0, R2
+	ASL	R2		; command << 5 into bits 12..5
+	ASL	R2
+	ASL	R2
+	ASL	R2
+	ASL	R2
+	BIS	#100000, R2	; 100 prefix
+	BIS	#20, R2		; pad bit
+	MOV	#^D12, R3
+	JSR	PC, SENDB
+	MOV	#LCDCS!LCDWR, @#VIAORA	; CS high
+	RTS	PC
+
+; ---- clock out R3 bits of R2, MSB first -----------------------------
+; each VIA access is microseconds - far above the TM1622 minimum
+; pulse widths, so no extra delays are needed
+
+SENDB:	ASL	R2		; next bit into carry
+	MOV	#0, R0		; WR low, DATA 0 (MOV keeps carry)
+	BCC	SENDB1
+	MOV	#LCDDA, R0	; DATA 1
+SENDB1:	MOV	R0, @#VIAORA	; WR low, data valid
+	BIS	#LCDWR, R0
+	MOV	R0, @#VIAORA	; WR rise latches the bit
+	SOB	R3, SENDB
+	RTS	PC
+
+; ---- 16-segment font, ASCII 040..0177 -------------------------------
+; one word per glyph; bit assignment per the DM8BA10 segment map
+
+FONT:
+	.WORD	000000, 002500, 000140, 012553, 132713, 136133, 151505, 000100	;  !"#$%&'
+	.WORD	000024, 044000, 056134, 012110, 004000, 010010, 000400, 004020	; ()*+,-./
+	.WORD	125663, 000062, 111651, 100653, 030052, 130613, 131613, 100242	; 01234567
+	.WORD	131653, 130653, 002100, 004100, 010024, 010411, 044010, 102250	; 89:;<=>?
+	.WORD	121671, 131252, 102753, 121601, 102743, 131601, 131200, 121613	; @ABCDEFG
+	.WORD	031052, 102701, 001443, 031024, 021401, 061062, 061046, 121643	; HIJKLMNO
+	.WORD	131250, 121647, 131254, 130613, 102300, 021443, 025020, 025046	; PQRSTUVW
+	.WORD	044024, 032050, 104621, 002301, 040004, 102500, 004004, 000401	; XYZ[\]^_
+	.WORD	040000, 013404, 033400, 011400, 013500, 015400, 012310, 132500	; `abcdefg
+	.WORD	033000, 002200, 002700, 002124, 002100, 013012, 013000, 013400	; hijklmno
+	.WORD	131100, 132100, 011000, 006400, 012111, 003400, 005000, 005006	; pqrstuvw
+	.WORD	044024, 044020, 014400, 012301, 002100, 102510, 040020, 177777	; xyz{|}~ DEL
+	.EVEN

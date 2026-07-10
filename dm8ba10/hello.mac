@@ -1,0 +1,24 @@
+; hello.mac — DM8BA10 example: write "Hello"
+;
+; Wiring and driver: see dm8ba10.mac. Runs on the DCJ-11 SBC by
+; Peter Schranz with the Multi IO card (VIA port A).
+;
+; Assemble:	m11asm -b 1000 hello.mac
+; Load:		paste hello.oct into J11Terminal Octal Upload
+; Run:		from ODT prompt:  1000G
+
+.	= 001000
+
+START:	MOV	#1000, SP	; stack below the code
+	JSR	PC, LCDINI
+	MOV	#MSG, R0
+	MOV	#2, R1		; start at position 2 - roughly centered
+	JSR	PC, LCDSTR
+	HALT
+
+MSG:	.ASCIZ	/Hello/
+	.EVEN
+
+	.INCLUDE /dm8ba10.mac/
+
+	.END	START
