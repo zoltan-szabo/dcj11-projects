@@ -1,3 +1,5 @@
 *.oct
 *.bin
+*.lst
+*.sym
 .DS_Store
