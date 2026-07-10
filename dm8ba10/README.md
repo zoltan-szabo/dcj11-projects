@@ -49,7 +49,7 @@ paste `hello.oct` into J11Terminal Octal Upload, then `1000G`.
 
 ## Notes
 
-- Requires m11asm with `.INCLUDE` support.
+- Requires m11asm v0.3.0 or later (for `.INCLUDE`).
 - The driver owns port A direction (writes DDRA = 17; PA4-PA7 inputs).
 - The backlight bit shares port A with the serial lines. Every port write
   in the driver ORs in `LEDSTA`, the shadow of the current backlight

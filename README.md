@@ -9,8 +9,9 @@ MACRO-11 projects for the DCJ-11 SBC and Multi IO card by Peter Schranz
 
 ## Toolchain
 
-- [m11asm](https://github.com/zoltan-szabo/m11asm) — MACRO-11 assembler
-  (requires `.INCLUDE` support, v0.2 or later)
+- [m11asm](https://github.com/zoltan-szabo/m11asm) — MACRO-11 assembler,
+  **v0.3.0 or later** (the examples use `.INCLUDE`; check with
+  `m11asm --version`)
 - [J11Terminal](https://github.com/zoltan-szabo/j11-terminal) — serial
   terminal with ODT upload
 
