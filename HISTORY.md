@@ -3,6 +3,18 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## max7219 driver and Hello example (2026-07-11)
+
+Driver for chained 1088AS 8x8 LED matrix panels on a MAX7219 / GC7219C,
+bit-banged over VIA port A (DIN=PA0, CS=PA1, CLK=PA2). 1..MAXMOD modules;
+MXINIT takes the count in R0. Column-major framebuffer (one byte per
+column, bit 0 top) with MXFLSH shifting the whole chain and latching on
+CS. Text via the classic Pascal Stang font5x7 (avrlib 2001), verified in
+ASCII-art to render "Hello" before emission. Bring-up routines MXDTST
+(all-on) and MXWALK (single dot through every pixel) verify wiring and
+orientation, since generic modules vary in digit-to-matrix mapping. The
+Hello example centers "Hello" on a 6-module chain. Not yet hardware-tested.
+
 ## dm8ba10 backlight support (2026-07-10)
 
 The panel's LED backlight is wired to VIA PA3. Because the backlight bit

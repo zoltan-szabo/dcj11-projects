@@ -1,0 +1,37 @@
+; hello.mac — MAX7219 chain example: display "Hello" centered
+;
+; Six 8x8 modules chained = 48 columns. "Hello" is 5 chars x 6 columns =
+; 30 columns, centered by starting at column 9.
+;
+; Wiring and driver: see max7219.mac. Runs on the DCJ-11 SBC by Peter
+; Schranz with the Multi IO card (VIA port A).
+;
+; Assemble:	m11asm -b 1000 hello.mac
+; Load:		paste hello.oct into J11Terminal Octal Upload
+; Run:		from ODT prompt:  1000G
+
+.	= 001000
+
+NMOD	= 6			; modules in the chain (default 4; 6 here)
+
+START:	MOV	#1000, SP	; stack below the code
+	MOV	#NMOD, R0
+	JSR	PC, MXINIT
+
+; --- bring-up (uncomment to verify wiring/orientation first) ---
+;	MOV	#1, R0		; all LEDs on
+;	JSR	PC, MXDTST
+;	JSR	PC, MXWALK	; one dot through every pixel
+
+	MOV	#MSG, R0
+	MOV	#^D9, R1	; centre "Hello" in 48 columns
+	JSR	PC, MXSTR
+	JSR	PC, MXFLSH
+	HALT
+
+MSG:	.ASCIZ	/HELLO/
+	.EVEN
+
+	.INCLUDE /max7219.mac/
+
+	.END	START

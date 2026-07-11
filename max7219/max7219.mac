@@ -1,0 +1,374 @@
+; max7219.mac — driver for chained MAX7219 / GC7219C 8x8 LED matrix modules
+;
+; For 1088AS 8x8 matrix panels driven by a MAX7219 (or GC7219C clone), the
+; common chainable "dot matrix module". 1..MAXMOD modules in a chain.
+;
+; Wiring (W65C22S VIA on the Multi IO card, port A):
+;	DIN - PA0
+;	CS  - PA1   (LOAD; data latched on its rising edge)
+;	CLK - PA2
+;
+; API (routines clobber R0-R3 unless noted; R4/R5 are preserved):
+;	MXINIT	R0 = number of modules (1..MAXMOD). Init all, clear, display on.
+;	MXCLR	blank the framebuffer and the display
+;	MXFLSH	shift the framebuffer to the chain
+;	MXBRT	R0 = intensity 0..17 (octal; 0 dim .. 17 bright)
+;	MXCH	R0 = ASCII char, R1 = start column -> render, R1 advanced by 6
+;	MXSTR	R0 -> ASCIZ string, R1 = start column (also uses R4)
+;
+; Bring-up tests (verify wiring and orientation before trusting the font):
+;	MXDTST	R0 = 1 all LEDs on, 0 off (display-test register, ignores RAM)
+;	MXWALK	step one lit pixel through every position of every module
+;
+; The framebuffer is column-major: NCOL bytes, one per column across the
+; whole chain, bit 0 = top row. The font is the classic 5x7 dot-matrix set
+; (Pascal Stang's font5x7, column-major, bit 0 top) — so text is a plain
+; copy into the buffer, orientation-independent.
+;
+; ORIENTATION: these modules drive one matrix ROW per MAX7219 digit register,
+; so the column-major framebuffer is transposed (MXTRAN) before shifting.
+; If MXWALK shows the dot walking the wrong way on your modules:
+;   - mirrored left/right  -> in MXTRAN use  MOV #200,R4  and  ROR R4
+;                             (column 0 -> bit 7 instead of bit 0)
+;   - upside down          -> in MXTRAN drop the row-flip: MOV R1,R3 with
+;                             INC R3, so row r goes to slot r
+;
+; Runs on the DCJ-11 SBC + Multi IO card by Peter Schranz:
+;	https://www.5volts.ch/pages/dcj11sbc/
+; Font: Pascal Stang font5x7 (avrlib, 2001), public 5x7 dot-matrix set.
+; Orientation verified on hardware 2026-07-11 (transpose + row-flip).
+
+VIAORA	= 174002		; VIA ORA/IRA - port A data
+VIADRA	= 174006		; VIA DDRA - direction, 1 bit = output
+
+DIN	= 1			; PA0
+CS	= 2			; PA1: LOAD, active low during shift
+CLK	= 4			; PA2
+
+; MAX7219 register addresses (octal)
+RDIG0	= 1			; digit registers 1..8 = RDIG0..RDIG0+7
+RDECOD	= 011			; decode mode
+RINTEN	= 012			; intensity
+RSCAN	= 013			; scan limit
+RSHUT	= 014			; shutdown (0 = off, 1 = normal)
+RTEST	= 017			; display test
+
+MAXMOD	= ^D8			; framebuffer sized for up to 8 modules
+NCOL	= MAXMOD*10		; columns = MAXMOD * 8   (10 octal)
+
+; ---- initialize the chain, R0 = module count -----------------------
+
+MXINIT:	MOV	#7, @#VIADRA	; PA0-2 outputs
+	MOV	#CS, @#VIAORA	; idle: CS high, CLK low, DIN low
+	MOV	R0, NMODS
+	MOV	#RDECOD*400, R2		; no BCD decode
+	JSR	PC, MXALL
+	MOV	#RSCAN*400+7, R2	; scan all 8 digits
+	JSR	PC, MXALL
+	MOV	#RINTEN*400+7, R2	; medium intensity
+	JSR	PC, MXALL
+	MOV	#RTEST*400, R2		; display test off
+	JSR	PC, MXALL
+	MOV	#RSHUT*400+1, R2	; normal operation
+	JSR	PC, MXALL
+	JSR	PC, MXCLR
+	RTS	PC
+
+; ---- intensity, R0 = 0..17 octal -----------------------------------
+
+MXBRT:	MOV	#RINTEN*400, R2
+	BIC	#177760, R0	; keep low nibble
+	BIS	R0, R2
+	JSR	PC, MXALL
+	RTS	PC
+
+; ---- send 16-bit word R2 to every module, framed by CS -------------
+
+MXALL:	MOV	R4, -(SP)
+	MOV	#0, @#VIAORA	; CS low - begin shift
+	MOV	NMODS, R4
+	MOV	R2, -(SP)	; MXSEND shifts R2 to 0
+MXALL1:	MOV	(SP), R2
+	JSR	PC, MXSEND
+	SOB	R4, MXALL1
+	TST	(SP)+
+	MOV	#CS, @#VIAORA	; CS rising edge latches all
+	MOV	(SP)+, R4
+	RTS	PC
+
+; ---- shift 16 bits of R2, MSB first, CS assumed already low --------
+
+MXSEND:	MOV	#^D16, R3
+MXSND1:	ASL	R2		; next bit -> carry
+	MOV	#0, R0		; DIN 0, CLK 0, CS 0 (MOV keeps carry)
+	BCC	MXSND2
+	BIS	#DIN, R0	; DIN 1 (BIS keeps carry)
+MXSND2:	MOV	R0, @#VIAORA	; data valid, CLK low
+	BIS	#CLK, R0
+	MOV	R0, @#VIAORA	; CLK rising edge samples the bit
+	SOB	R3, MXSND1
+	RTS	PC
+
+; ---- blank framebuffer and display ---------------------------------
+
+MXCLR:	MOV	#COLBUF, R0
+	MOV	#NCOL, R1
+MXCLR1:	CLRB	(R0)+
+	SOB	R1, MXCLR1
+	JSR	PC, MXFLSH
+	RTS	PC
+
+; ---- transpose COLBUF (columns) into ROWBUF (rows) ------------------
+; ROWBUF[m*8 + (7-r)], bit c = COLBUF[m*8 + c], bit r. These modules drive
+; one matrix row per MAX7219 digit register and number the rows bottom-up,
+; so the column-major framebuffer is transposed AND row-flipped before
+; shifting (row r goes to slot 7-r).
+
+MXTRAN:	MOV	#ROWBUF, R0	; clear ROWBUF
+	MOV	#NCOL, R1
+MXTRZ:	CLRB	(R0)+
+	SOB	R1, MXTRZ
+	MOV	#COLBUF, R0	; column source, walks continuously
+	MOV	#ROWBUF, R1	; row base of the current module
+	MOV	NMODS, R2	; modules
+MXTRM:	MOV	R2, -(SP)	; save module counter
+	MOV	#^D8, R2	; 8 columns per module
+	MOV	#1, R4		; column bit: col 0 -> bit 0
+MXTRC:	MOVB	(R0)+, R5	; one column byte, bit 0 = top row
+	MOV	R1, R3		; row pointer = module base + 7 (row-flip)
+	ADD	#7, R3
+	MOV	#^D8, -(SP)	; 8 rows
+MXTRR:	ROR	R5		; next row bit (row 0 first) -> carry
+	BCC	MXTRR1
+	BISB	R4, (R3)	; set that row's byte at this column bit
+MXTRR1:	DEC	R3		; slot 7-r: walk rows upward
+	DEC	(SP)
+	BGT	MXTRR
+	TST	(SP)+		; drop row count
+	ASL	R4		; column bit -> next higher
+	SOB	R2, MXTRC
+	MOV	(SP)+, R2	; restore module counter
+	ADD	#^D8, R1	; next module row base
+	SOB	R2, MXTRM
+	RTS	PC
+
+; ---- shift the framebuffer to the chain ----------------------------
+; for each digit register D(1..8): CS low; far module first, send its
+; column byte; CS high to latch.
+
+MXFLSH:	JSR	PC, MXTRAN	; column-major -> row-major (with 90-deg fix)
+	MOV	R4, -(SP)
+	MOV	R5, -(SP)
+	MOV	#1, R5		; digit register 1..8
+MXFL1:	MOV	#0, @#VIAORA	; CS low
+	MOV	NMODS, R4	; module counter, far -> near
+MXFL2:	MOV	R4, R0		; column index = (module) * 8 + (D-1)
+	DEC	R0		; module = R4 - 1
+	ASL	R0
+	ASL	R0
+	ASL	R0		; * 8
+	ADD	R5, R0
+	DEC	R0		; + (D - 1)
+	MOVB	ROWBUF(R0), R2
+	BIC	#177400, R2	; data byte
+	MOV	R5, R0
+	SWAB	R0		; D into the high byte
+	BIS	R0, R2		; word = D*400 + column
+	JSR	PC, MXSEND
+	SOB	R4, MXFL2
+	MOV	#CS, @#VIAORA	; latch this digit across all modules
+	INC	R5
+	CMP	R5, #^D9
+	BLT	MXFL1
+	MOV	(SP)+, R5
+	MOV	(SP)+, R4
+	RTS	PC
+
+; ---- render one character, R0 = ASCII, R1 = start column -----------
+; copies 5 glyph columns + 1 blank; advances R1; clips at NCOL
+
+MXCH:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	SUB	#40, R0		; index = ASCII - 040
+	BLT	MXCHX
+	CMP	R0, #^D95
+	BGT	MXCHX
+	MOV	R0, R2		; glyph = FONT + index*5
+	ASL	R0
+	ASL	R0
+	ADD	R2, R0
+	ADD	#FONT, R0
+	MOV	#5, R3
+MXCH1:	CMP	R1, #NCOL
+	BGE	MXCH2
+	MOVB	(R0)+, COLBUF(R1)
+	INC	R1
+	SOB	R3, MXCH1
+MXCH2:	CMP	R1, #NCOL	; trailing blank column
+	BGE	MXCHX
+	CLRB	COLBUF(R1)
+	INC	R1
+MXCHX:	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- render ASCIZ string, R0 -> text, R1 = start column ------------
+
+MXSTR:	MOV	R4, -(SP)
+	MOV	R0, R4
+MXSTR1:	MOVB	(R4)+, R0
+	BEQ	MXSTRX
+	JSR	PC, MXCH
+	BR	MXSTR1
+MXSTRX:	MOV	(SP)+, R4
+	RTS	PC
+
+; ---- bring-up: display-test register, R0 = 1 on / 0 off ------------
+
+MXDTST:	MOV	#RTEST*400, R2
+	BIC	#177776, R0
+	BIS	R0, R2
+	JSR	PC, MXALL
+	RTS	PC
+
+; ---- bring-up: walk one dot through every visible pixel ------------
+
+MXWALK:	JSR	PC, MXCLR
+	CLR	R5		; column
+MXWK1:	MOV	NMODS, R0	; visible columns = NMODS * 8
+	ASL	R0
+	ASL	R0
+	ASL	R0
+	CMP	R5, R0
+	BGE	MXWKX
+	CLR	R4		; row 0..7
+MXWK2:	MOV	#1, R0		; pixel = 1 << row
+	MOV	R4, R1
+	BEQ	MXWK4
+MXWK3:	ASL	R0
+	SOB	R1, MXWK3
+MXWK4:	MOVB	R0, COLBUF(R5)
+	JSR	PC, MXFLSH
+	JSR	PC, MXDLY
+	CLRB	COLBUF(R5)
+	INC	R4
+	CMP	R4, #^D8
+	BLT	MXWK2
+	INC	R5
+	BR	MXWK1
+MXWKX:	JSR	PC, MXCLR
+	RTS	PC
+
+MXDLY:	MOV	#^D40, R0
+MXDL1:	MOV	#^D1500, R1
+MXDL2:	SOB	R1, MXDL2
+	SOB	R0, MXDL1
+	RTS	PC
+
+; ---- state ---------------------------------------------------------
+
+NMODS:	.WORD	0		; module count from MXINIT
+COLBUF:	.BLKB	NCOL		; column framebuffer, bit 0 = top row
+ROWBUF:	.BLKB	NCOL		; row-major image built by MXTRAN, sent by MXFLSH
+	.EVEN
+
+; ---- 5x7 font, ASCII 040..0177, 5 column bytes per glyph -----------
+; Pascal Stang font5x7 (avrlib, 2001). Column-major, bit 0 = top row.
+
+FONT:
+	.BYTE	000, 000, 000, 000, 000	; space
+	.BYTE	000, 000, 137, 000, 000	; !
+	.BYTE	000, 007, 000, 007, 000	; "
+	.BYTE	024, 177, 024, 177, 024	; #
+	.BYTE	044, 052, 177, 052, 022	; $
+	.BYTE	043, 023, 010, 144, 142	; %
+	.BYTE	066, 111, 125, 042, 120	; &
+	.BYTE	000, 005, 003, 000, 000	; '
+	.BYTE	000, 034, 042, 101, 000	; (
+	.BYTE	000, 101, 042, 034, 000	; )
+	.BYTE	010, 052, 034, 052, 010	; *
+	.BYTE	010, 010, 076, 010, 010	; +
+	.BYTE	000, 120, 060, 000, 000	; ,
+	.BYTE	010, 010, 010, 010, 010	; -
+	.BYTE	000, 140, 140, 000, 000	; .
+	.BYTE	040, 020, 010, 004, 002	; /
+	.BYTE	076, 121, 111, 105, 076	; 0
+	.BYTE	000, 102, 177, 100, 000	; 1
+	.BYTE	102, 141, 121, 111, 106	; 2
+	.BYTE	041, 101, 105, 113, 061	; 3
+	.BYTE	030, 024, 022, 177, 020	; 4
+	.BYTE	047, 105, 105, 105, 071	; 5
+	.BYTE	074, 112, 111, 111, 060	; 6
+	.BYTE	001, 161, 011, 005, 003	; 7
+	.BYTE	066, 111, 111, 111, 066	; 8
+	.BYTE	006, 111, 111, 051, 036	; 9
+	.BYTE	000, 066, 066, 000, 000	; :
+	.BYTE	000, 126, 066, 000, 000	; ;
+	.BYTE	000, 010, 024, 042, 101	; <
+	.BYTE	024, 024, 024, 024, 024	; =
+	.BYTE	101, 042, 024, 010, 000	; >
+	.BYTE	002, 001, 121, 011, 006	; ?
+	.BYTE	062, 111, 171, 101, 076	; @
+	.BYTE	176, 021, 021, 021, 176	; A
+	.BYTE	177, 111, 111, 111, 066	; B
+	.BYTE	076, 101, 101, 101, 042	; C
+	.BYTE	177, 101, 101, 042, 034	; D
+	.BYTE	177, 111, 111, 111, 101	; E
+	.BYTE	177, 011, 011, 001, 001	; F
+	.BYTE	076, 101, 101, 121, 062	; G
+	.BYTE	177, 010, 010, 010, 177	; H
+	.BYTE	000, 101, 177, 101, 000	; I
+	.BYTE	040, 100, 101, 077, 001	; J
+	.BYTE	177, 010, 024, 042, 101	; K
+	.BYTE	177, 100, 100, 100, 100	; L
+	.BYTE	177, 002, 004, 002, 177	; M
+	.BYTE	177, 004, 010, 020, 177	; N
+	.BYTE	076, 101, 101, 101, 076	; O
+	.BYTE	177, 011, 011, 011, 006	; P
+	.BYTE	076, 101, 121, 041, 136	; Q
+	.BYTE	177, 011, 031, 051, 106	; R
+	.BYTE	106, 111, 111, 111, 061	; S
+	.BYTE	001, 001, 177, 001, 001	; T
+	.BYTE	077, 100, 100, 100, 077	; U
+	.BYTE	037, 040, 100, 040, 037	; V
+	.BYTE	177, 040, 030, 040, 177	; W
+	.BYTE	143, 024, 010, 024, 143	; X
+	.BYTE	003, 004, 170, 004, 003	; Y
+	.BYTE	141, 121, 111, 105, 103	; Z
+	.BYTE	000, 000, 177, 101, 101	; [
+	.BYTE	002, 004, 010, 020, 040	; \
+	.BYTE	101, 101, 177, 000, 000	; ]
+	.BYTE	004, 002, 001, 002, 004	; ^
+	.BYTE	100, 100, 100, 100, 100	; _
+	.BYTE	000, 001, 002, 004, 000	; `
+	.BYTE	040, 124, 124, 124, 170	; a
+	.BYTE	177, 110, 104, 104, 070	; b
+	.BYTE	070, 104, 104, 104, 040	; c
+	.BYTE	070, 104, 104, 110, 177	; d
+	.BYTE	070, 124, 124, 124, 030	; e
+	.BYTE	010, 176, 011, 001, 002	; f
+	.BYTE	010, 024, 124, 124, 074	; g
+	.BYTE	177, 010, 004, 004, 170	; h
+	.BYTE	000, 104, 175, 100, 000	; i
+	.BYTE	040, 100, 104, 075, 000	; j
+	.BYTE	000, 177, 020, 050, 104	; k
+	.BYTE	000, 101, 177, 100, 000	; l
+	.BYTE	174, 004, 030, 004, 170	; m
+	.BYTE	174, 010, 004, 004, 170	; n
+	.BYTE	070, 104, 104, 104, 070	; o
+	.BYTE	174, 024, 024, 024, 010	; p
+	.BYTE	010, 024, 024, 030, 174	; q
+	.BYTE	174, 010, 004, 004, 010	; r
+	.BYTE	110, 124, 124, 124, 040	; s
+	.BYTE	004, 077, 104, 100, 040	; t
+	.BYTE	074, 100, 100, 040, 174	; u
+	.BYTE	034, 040, 100, 040, 034	; v
+	.BYTE	074, 100, 060, 100, 074	; w
+	.BYTE	104, 050, 020, 050, 104	; x
+	.BYTE	014, 120, 120, 120, 074	; y
+	.BYTE	104, 144, 124, 114, 104	; z
+	.BYTE	000, 010, 066, 101, 000	; {
+	.BYTE	000, 000, 177, 000, 000	; |
+	.BYTE	000, 101, 066, 010, 000	; }
+	.BYTE	010, 010, 052, 034, 010	; ~
+	.BYTE	010, 034, 052, 010, 010	; 	.EVEN
