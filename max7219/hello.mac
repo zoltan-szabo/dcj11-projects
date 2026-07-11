@@ -29,7 +29,7 @@ START:	MOV	#1000, SP	; stack below the code
 	JSR	PC, MXFLSH
 	HALT
 
-MSG:	.ASCIZ	/HELLO/
+MSG:	.ASCIZ	/Hello/
 	.EVEN
 
 	.INCLUDE /max7219.mac/
