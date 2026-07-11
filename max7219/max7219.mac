@@ -156,9 +156,9 @@ MXTRR1:	DEC	R3		; slot 7-r: walk rows upward
 ; for each digit register D(1..8): CS low; far module first, send its
 ; column byte; CS high to latch.
 
-MXFLSH:	JSR	PC, MXTRAN	; column-major -> row-major (with 90-deg fix)
-	MOV	R4, -(SP)
+MXFLSH:	MOV	R4, -(SP)	; save first — MXTRAN clobbers R4/R5
 	MOV	R5, -(SP)
+	JSR	PC, MXTRAN	; column-major -> row-major (90-deg + row flip)
 	MOV	#1, R5		; digit register 1..8
 MXFL1:	MOV	#0, @#VIAORA	; CS low
 	MOV	NMODS, R4	; module counter, far -> near
