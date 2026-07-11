@@ -1,0 +1,129 @@
+; i2c.mac — software (bit-banged) I2C master for the DCJ-11
+;
+; Two-wire I2C on the W65C22S VIA port B. Open-drain is done the proper way:
+; a line is released HIGH by making the pin an input (the bus pull-up pulls
+; it up) and driven LOW by making it an output (its ORB bit is held at 0).
+; Only PB0/PB1 are touched, so the rest of port B is left alone.
+;
+; Wiring (Multi IO card, port B):
+;	SDA - PB0
+;	SCL - PB1
+; The bus needs pull-ups to Vcc (most modules have them on board).
+;
+; API:
+;	I2CINI	release the bus (idle high); call once
+;	I2CSTA	send a START condition
+;	I2CSTO	send a STOP condition
+;	I2CWR	R0 = byte to send; returns R0 = 0 if the slave ACKed, 1 if not
+;	I2CRD	R1 = 0 to ACK / non-zero to NACK; returns the byte in R0
+;	I2CPING	R0 = 7-bit address; returns R0 = 0 if a device answers
+;
+; I2CWR/I2CRD preserve R2/R3; all routines preserve R4/R5.
+
+VIAORB	= 174000		; VIA ORB/IRB - port B data
+VIADRB	= 174004		; VIA DDRB - direction, 1 = output
+
+I2CSDA	= 1			; PB0
+I2CSCL	= 2			; PB1
+
+; ---- line primitives -----------------------------------------------
+; ORB bits for SDA/SCL are kept 0, so "output" means "drive low".
+
+I2CINI:	BIC	#I2CSDA!I2CSCL, @#VIAORB	; both would drive 0 when output
+	BIC	#I2CSDA!I2CSCL, @#VIADRB	; both inputs -> released high (idle)
+	RTS	PC
+
+SDAHI:	BIC	#I2CSDA, @#VIADRB	; input -> pulled high
+	RTS	PC
+SDALO:	BIS	#I2CSDA, @#VIADRB	; output -> driven low
+	RTS	PC
+SCLHI:	BIC	#I2CSCL, @#VIADRB
+	JSR	PC, I2CDLY
+	RTS	PC
+SCLLO:	BIS	#I2CSCL, @#VIADRB
+	JSR	PC, I2CDLY
+	RTS	PC
+
+I2CDLY:	MOV	R5, -(SP)	; generous half-bit settle (bit-banged, no stretching)
+	MOV	#^D60, R5
+I2CDL1:	SOB	R5, I2CDL1
+	MOV	(SP)+, R5
+	RTS	PC
+
+; ---- START / STOP --------------------------------------------------
+
+I2CSTA:	JSR	PC, SDAHI
+	JSR	PC, SCLHI
+	JSR	PC, SDALO	; SDA high->low while SCL high
+	JSR	PC, SCLLO
+	RTS	PC
+
+I2CSTO:	JSR	PC, SCLLO
+	JSR	PC, SDALO
+	JSR	PC, SCLHI
+	JSR	PC, SDAHI	; SDA low->high while SCL high
+	RTS	PC
+
+; ---- write a byte, R0; returns R0 = 0 ACK / 1 NACK -----------------
+
+I2CWR:	MOV	R2, -(SP)
+	MOV	#^D8, R2	; 8 bits, MSB first
+I2CWR1:	BIT	#200, R0
+	BEQ	I2CWR2
+	JSR	PC, SDAHI
+	BR	I2CWR3
+I2CWR2:	JSR	PC, SDALO
+I2CWR3:	JSR	PC, SCLHI
+	JSR	PC, SCLLO
+	ASL	R0		; next bit into position 7
+	SOB	R2, I2CWR1
+	JSR	PC, SDAHI	; release for the ACK clock
+	JSR	PC, SCLHI
+	MOVB	@#VIAORB, R2	; sample SDA
+	JSR	PC, SCLLO
+	CLR	R0
+	BIT	#I2CSDA, R2
+	BEQ	I2CWR4
+	MOV	#1, R0		; SDA high = NACK
+I2CWR4:	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- read a byte; R1 = ACK(0)/NACK(nonzero); returns R0 -----------
+
+I2CRD:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	JSR	PC, SDAHI	; release SDA so the slave drives it
+	CLR	R3
+	MOV	#^D8, R2
+I2CRD1:	JSR	PC, SCLHI
+	MOVB	@#VIAORB, R0
+	ASL	R3
+	BIT	#I2CSDA, R0
+	BEQ	I2CRD2
+	INC	R3		; shift the bit in
+I2CRD2:	JSR	PC, SCLLO
+	SOB	R2, I2CRD1
+	TST	R1		; ACK or NACK for the byte just read
+	BEQ	I2CRDA
+	JSR	PC, SDAHI	; NACK
+	BR	I2CRDB
+I2CRDA:	JSR	PC, SDALO	; ACK
+I2CRDB:	JSR	PC, SCLHI
+	JSR	PC, SCLLO
+	JSR	PC, SDAHI
+	MOV	R3, R0
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- ping: R0 = 7-bit address; returns R0 = 0 if a device answers --
+
+I2CPING:MOV	R0, R1
+	ASL	R1		; address + write bit (0)
+	JSR	PC, I2CSTA
+	MOV	R1, R0
+	JSR	PC, I2CWR	; R0 = ACK result
+	MOV	R0, -(SP)
+	JSR	PC, I2CSTO
+	MOV	(SP)+, R0
+	RTS	PC

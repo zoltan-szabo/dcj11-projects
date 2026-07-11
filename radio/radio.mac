@@ -1,0 +1,173 @@
+; radio.mac — FM radio: TEA5767 tuner + MAX7219 matrix display
+;
+; Seeks up from the bottom of the FM band, stops at the first station, and
+; shows its frequency on the LED matrix chain with a live signal-strength
+; bar. Combines three drivers:
+;	../i2c/i2c.mac		software I2C on port B (SDA=PB0, SCL=PB1)
+;	../tea5767/tea5767.mac	FM tuner (uses i2c)
+;	../max7219/max7219.mac	LED matrix on port A (DIN=PA0, CS=PA1, CLK=PA2)
+;
+; Assemble:	m11asm -b 1000 radio.mac
+; Run:		1000G
+
+.	= 001000
+
+NMOD	= 6			; matrix modules in the chain
+FMBOT	= ^D8750		; band bottom = 87.5 MHz (10 kHz units)
+FMTOP	= ^D10800		; band top   = 108.0 MHz
+CONRCS	= 177560		; console receiver status (bit 7 = char ready)
+CONRBF	= 177562		; console receiver buffer
+
+START:	MOV	#1000, SP
+	MOV	#NMOD, R0	; bring up the display
+	JSR	PC, MXINIT
+	JSR	PC, FMINIT	; bring up the tuner
+
+	MOV	#FMBOT, R0	; seek up to the first station
+	JSR	PC, FMSEEK
+	MOV	R0, FREQU	; remember the tuned frequency
+
+LOOP:	JSR	PC, MXCLR
+	MOV	FREQU, R0
+	JSR	PC, RFREQ	; render "xxx.x"
+	JSR	PC, FMRD	; refresh status
+	JSR	PC, FMLEV	; R0 = signal level 0..15
+	JSR	PC, RBAR
+	JSR	PC, MXFLSH
+	JSR	PC, RWAIT	; ~150 ms, polling the console
+	MOV	R0, R1
+	CMP	R1, #-1		; no key
+	BEQ	LOOP
+	CMP	R1, #53		; '+' -> up 0.1 MHz
+	BEQ	RUP
+	CMP	R1, #165	; 'u'
+	BEQ	RUP
+	CMP	R1, #55		; '-' -> down 0.1 MHz
+	BEQ	RDN
+	CMP	R1, #144	; 'd'
+	BEQ	RDN
+	CMP	R1, #56		; '.' -> fine up 0.01 MHz
+	BEQ	RFUP
+	CMP	R1, #54		; ',' -> fine down 0.01 MHz
+	BEQ	RFDN
+	JSR	PC, SEEKNX	; any other key -> seek up
+	BR	LOOP
+
+RUP:	MOV	#^D10, R0	; coarse up   (0.1 MHz)
+	BR	RTUP
+RFUP:	MOV	#1, R0		; fine up     (0.01 MHz)
+RTUP:	ADD	FREQU, R0
+	CMP	R0, #FMTOP
+	BLE	RUP1
+	MOV	#FMTOP, R0
+RUP1:	MOV	R0, FREQU
+	JSR	PC, FMTUNE
+	BR	LOOP
+
+RDN:	MOV	#^D10, R0	; coarse down (0.1 MHz)
+	BR	RTDN
+RFDN:	MOV	#1, R0		; fine down   (0.01 MHz)
+RTDN:	MOV	FREQU, R1
+	SUB	R0, R1
+	MOV	R1, R0
+	CMP	R0, #FMBOT
+	BGE	RDN1
+	MOV	#FMBOT, R0
+RDN1:	MOV	R0, FREQU
+	JSR	PC, FMTUNE
+	BR	LOOP
+
+; ---- seek the next station up, wrapping at the band top -----------
+
+SEEKNX:	MOV	FREQU, R0
+	ADD	#^D20, R0	; start 0.2 MHz past the current station
+	CMP	R0, #FMTOP
+	BLE	SKNX1
+	MOV	#FMBOT, R0	; already near the top -> wrap
+SKNX1:	JSR	PC, FMSEEK
+	MOV	R0, FREQU
+	BITB	#100, TEARD+0	; band-limit flag: no station before the top?
+	BEQ	SKNX2
+	MOV	#FMBOT, R0	; wrap to the bottom and seek again
+	JSR	PC, FMSEEK
+	MOV	R0, FREQU
+SKNX2:	RTS	PC
+
+; ---- render frequency (R0 = 10 kHz units) as "xxx.x" at column 0 ---
+
+RFREQ:	CLR	R2		; tenths of MHz = units / 10
+	MOV	R0, R3
+	DIV	R2, #^D10
+	MOV	R2, R3		; tenths
+	CLR	R2
+	DIV	R2, #^D10	; R2 = whole MHz, R3 = tenth digit
+	MOV	R3, TENTH
+	MOV	R2, WHOLE
+	MOV	#FBUF, R4
+
+	MOV	WHOLE, R3	; hundreds digit
+	CLR	R2
+	DIV	R2, #^D100	; R2 = hundreds, R3 = remainder 0..99
+	MOV	R3, -(SP)
+	TST	R2
+	BEQ	RFRQ1
+	MOV	R2, R0
+	ADD	#60, R0
+	MOVB	R0, (R4)+
+RFRQ1:	MOV	(SP)+, R3	; tens and ones
+	CLR	R2
+	DIV	R2, #^D10	; R2 = tens, R3 = ones
+	MOV	R2, R0
+	ADD	#60, R0
+	MOVB	R0, (R4)+
+	MOV	R3, R0
+	ADD	#60, R0
+	MOVB	R0, (R4)+
+	MOVB	#56, (R4)+	; '.'
+	MOV	TENTH, R0
+	ADD	#60, R0
+	MOVB	R0, (R4)+
+	CLRB	(R4)		; NUL
+	MOV	#FBUF, R0
+	CLR	R1
+	JSR	PC, MXSTR
+	RTS	PC
+
+; ---- signal bar: R0 = level 0..15, lit columns from the right -----
+
+RBAR:	MOV	#^D48, R1
+	SUB	R0, R1		; start column = 48 - level
+RBAR1:	CMP	R1, #^D48
+	BGE	RBAR2
+	MOVB	#340, COLBUF(R1)	; bottom three rows lit
+	INC	R1
+	BR	RBAR1
+RBAR2:	RTS	PC
+
+; ---- wait ~150 ms, polling the console; R0 = 1 if a key arrived ----
+
+RWAIT:	MOV	#^D30, R2	; 30 chunks of ~5 ms
+RWA1:	BITB	#200, @#CONRCS	; receiver DONE?
+	BNE	RWA2
+	MOV	#^D2500, R3	; ~5 ms chunk
+RWA3:	SOB	R3, RWA3
+	SOB	R2, RWA1
+	MOV	#-1, R0		; no key
+	RTS	PC
+RWA2:	MOVB	@#CONRBF, R0	; the char (clears DONE)
+	BIC	#177400, R0	; MOVB sign-extends; keep the byte
+	RTS	PC
+
+; ---- state ---------------------------------------------------------
+
+FREQU:	.WORD	0		; tuned frequency, 10 kHz units
+WHOLE:	.WORD	0
+TENTH:	.WORD	0
+FBUF:	.BLKB	^D8		; "xxx.x" + NUL
+	.EVEN
+
+	.INCLUDE "../i2c/i2c.mac"
+	.INCLUDE "../tea5767/tea5767.mac"
+	.INCLUDE "../max7219/max7219.mac"
+
+	.END	START

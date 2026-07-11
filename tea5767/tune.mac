@@ -1,0 +1,9 @@
+.	= 1000
+START:	MOV	#1000, SP
+	JSR	PC, FMINIT
+	MOV	#^D10000, R0
+	JSR	PC, FMTUNE
+	HALT
+	.INCLUDE "../i2c/i2c.mac"
+	.INCLUDE /tea5767.mac/
+	.END	START

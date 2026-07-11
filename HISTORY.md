@@ -3,6 +3,28 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## I2C, TEA5767 and radio project (2026-07-11)
+
+Three layered projects. `i2c/i2c.mac` is a bit-banged I2C master on VIA
+port B (SDA=PB0, SCL=PB1), open-drain via DDR toggling. `tea5767/tea5767.mac`
+is an FM radio driver over that I2C layer (no direct VIA access): tune, seek,
+and status. Frequencies are in 10 kHz units; the PLL word
+(f_Hz + 225000) / 8192 is computed with the J-11 EIS MUL/ASHC/DIV
+(PLL math and the "xxx.x" display formatting both verified numerically).
+`radio/radio.mac` combines i2c + tea5767 + max7219 into an FM radio: seek to
+the first station, then tune from the console (+/- coarse 0.1 MHz, ./, fine
+0.01 MHz, any other key seeks up), with a live signal bar on the matrix.
+
+The MAX7219 matrix turned out to inject audible noise into the FM front end —
+it multiplexes continuously and the redraw bursts land in the audio band.
+`radio/radio-lcd.mac` is a fork onto the static DM8BA10 LCD (port A), which
+stays quiet: "xxx.xx" frequency (two decimals so the fine step shows) with the
+signal level as a number on the rightmost digit. It starts tuned to 93.4 MHz
+with the backlight on. Hardware-tested and working.
+
+Note: m11asm parses EIS operands register-first (MUL Rn, src), reversed from
+MACRO-11 — see m11asm#6. The tea5767 driver is written to that convention.
+
 ## max7219 driver and Hello example (2026-07-11)
 
 Driver for chained 1088AS 8x8 LED matrix panels on a MAX7219 / GC7219C,

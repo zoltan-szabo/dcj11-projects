@@ -1,0 +1,147 @@
+; tea5767.mac — TEA5767 FM radio driver for the DCJ-11
+;
+; Talks to the TEA5767 only through the software I2C layer (i2c.mac), so it
+; touches no VIA hardware itself. Include i2c.mac BEFORE this file.
+;
+; Frequencies are in units of 10 kHz (100.00 MHz = 10000), which spans the
+; FM band in 16 bits and matches channel spacing. High-side injection,
+; 32.768 kHz crystal, 50 us de-emphasis (Europe).
+;
+; PLL word (high-side) = (f_Hz + 225000) / 8192, computed as
+;	(units * 10000 + 229096) >> 13   [+4096 rounds the shift]
+; using the J-11 EIS MUL / ASHC / DIV.
+;
+; API (clobber R0-R4; R5 preserved):
+;	FMINIT	set up I2C and the default config
+;	FMTUNE	R0 = frequency (10 kHz units) -> tune and play
+;	FMSEEK	R0 = start frequency -> search up, stop at a station,
+;		returns R0 = found frequency (10 kHz units)
+;	FMRD	refresh the 5 status bytes into TEARD
+;	FMFRQ	returns R0 = tuned frequency from TEARD (call FMRD first)
+;	FMLEV	returns R0 = signal level 0..15 from TEARD
+;	FMSTER	returns R0 = 1 if stereo, else 0, from TEARD
+
+TEAWR	= 300			; I2C write address (0xC0)
+TEARDA	= 301			; I2C read address  (0xC1)
+
+; ---- init ----------------------------------------------------------
+
+FMINIT:	JSR	PC, I2CINI
+	CLRB	TEABUF+0	; PLL high, MUTE=0, SM=0
+	CLRB	TEABUF+1	; PLL low
+	MOVB	#020, TEABUF+2	; HLSI = 1 (high-side injection)
+	MOVB	#036, TEABUF+3	; XTAL=1, SMUTE, HCC, SNC (cleaner weak signals)
+	CLRB	TEABUF+4	; PLLREF = 0, DTC = 0 (50 us)
+	RTS	PC
+
+; ---- PLL from frequency, R0 = units -> TEABUF[0],[1] ---------------
+
+FMPLL:	MOV	R0, R2
+	MUL	R2, #^D10000	; R2:R3 = units * 10000
+	ADD	#^D32488, R3	; + (225000 + 4096), low word
+	ADC	R2
+	ADD	#3, R2		; + high word
+	ASHC	R2, #-13	; >> 13 -> R3 = PLL (14-bit)
+	MOVB	R3, TEABUF+1	; PLL[7:0]
+	SWAB	R3
+	BIC	#177700, R3	; keep PLL[13:8], MUTE=0 SM=0
+	MOVB	R3, TEABUF+0
+	RTS	PC
+
+; ---- tune, R0 = units ----------------------------------------------
+
+FMTUNE:	JSR	PC, FMPLL
+	MOVB	#020, TEABUF+2	; high-side, no search
+	JSR	PC, FMSET
+	RTS	PC
+
+; ---- write TEABUF (5 bytes) to the chip ---------------------------
+
+FMSET:	JSR	PC, I2CSTA
+	MOV	#TEAWR, R0
+	JSR	PC, I2CWR
+	MOV	#TEABUF, R4
+	MOV	#5, R2
+FMSET1:	MOVB	(R4)+, R0
+	JSR	PC, I2CWR
+	SOB	R2, FMSET1
+	JSR	PC, I2CSTO
+	RTS	PC
+
+; ---- read 5 status bytes into TEARD -------------------------------
+
+FMRD:	JSR	PC, I2CSTA
+	MOV	#TEARDA, R0
+	JSR	PC, I2CWR
+	MOV	#TEARD, R4
+	MOV	#5, R2
+FMRD1:	CLR	R1		; ACK all but the last byte
+	CMP	R2, #1
+	BNE	FMRD2
+	MOV	#1, R1		; last byte -> NACK
+FMRD2:	JSR	PC, I2CRD
+	MOVB	R0, (R4)+
+	SOB	R2, FMRD1
+	JSR	PC, I2CSTO
+	RTS	PC
+
+; ---- frequency from TEARD PLL -> R0 units -------------------------
+
+FMFRQ:	MOVB	TEARD+0, R3
+	BIC	#177700, R3	; PLL[13:8]
+	SWAB	R3
+	BISB	TEARD+1, R3	; | PLL[7:0]  -> R3 = PLL
+	CLR	R2
+	ASHC	R2, #^D13	; R2:R3 = PLL << 13
+	SUB	#^D28392, R3	; - 225000
+	SBC	R2
+	SUB	#3, R2
+	DIV	R2, #^D10000	; R2 = quotient = units
+	MOV	R2, R0
+	RTS	PC
+
+; ---- level (0..15) and stereo from TEARD --------------------------
+
+FMLEV:	MOVB	TEARD+3, R0
+	BIC	#177400, R0
+	ASH	R0, #-4		; LEV[3:0]
+	RTS	PC
+
+FMSTER:	CLR	R0
+	BITB	#200, TEARD+2	; STEREO bit
+	BEQ	FMSTE1
+	INC	R0
+FMSTE1:	RTS	PC
+
+; ---- seek up, R0 = start units -> R0 = found units ----------------
+
+FMSEEK:	JSR	PC, FMPLL
+	BISB	#100, TEABUF+0	; SM = 1 (search)
+	MOVB	#360, TEABUF+2	; HLSI + SUD(up) + SSL(high) — strong stations only
+	JSR	PC, FMSET
+FMSK1:	JSR	PC, FMDLY
+	JSR	PC, FMRD
+	BITB	#200, TEARD+0	; RF ready (station or band limit)?
+	BEQ	FMSK1
+	MOVB	TEARD+0, R3	; retune cleanly on the found PLL
+	BIC	#177700, R3	; also clears SM
+	MOVB	R3, TEABUF+0
+	MOVB	TEARD+1, TEABUF+1
+	MOVB	#020, TEABUF+2	; stop searching
+	JSR	PC, FMSET
+	JSR	PC, FMFRQ	; R0 = found frequency
+	RTS	PC
+
+FMDLY:	MOV	R5, -(SP)	; ~30 ms search settle (16 MHz)
+	MOV	#^D40, R5
+FMDL1:	MOV	#^D1200, R4
+FMDL2:	SOB	R4, FMDL2
+	SOB	R5, FMDL1
+	MOV	(SP)+, R5
+	RTS	PC
+
+; ---- state ---------------------------------------------------------
+
+TEABUF:	.BLKB	5		; 5-byte control image written to the chip
+TEARD:	.BLKB	5		; 5-byte status image read back
+	.EVEN

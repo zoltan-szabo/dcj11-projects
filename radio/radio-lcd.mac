@@ -1,0 +1,199 @@
+; radio-lcd.mac — FM radio: TEA5767 tuner + DM8BA10 LCD display
+;
+; Same radio as radio.mac, but drives the static DM8BA10 LCD instead of the
+; MAX7219 LED matrix. The matrix multiplexes continuously and its refresh
+; bursts couple audible noise into the FM front end; the LCD holds its
+; segments statically and stays quiet.
+;
+; Starts tuned to 93.4 MHz (backlight on) and shows "xxx.xx" at the left with
+; the signal level as a number ending on the rightmost digit (cell 9). The
+; second decimal makes the 0.01 MHz fine steps visible. Combines three drivers:
+;	../i2c/i2c.mac		software I2C on port B (SDA=PB0, SCL=PB1)
+;	../tea5767/tea5767.mac	FM tuner (uses i2c)
+;	../dm8ba10/dm8ba10.mac	10-digit LCD on port A (CS=PA0 WR=PA1 DATA=PA2)
+;
+; Keys (console): + / u  up 0.1 MHz     - / d  down 0.1 MHz
+;		  .       up 0.01 MHz    ,      down 0.01 MHz
+;		  other   seek up
+;
+; Assemble:	m11asm -b 1000 radio-lcd.mac
+; Run:		1000G
+
+.	= 001000
+
+FMBOT	= ^D8750		; band bottom = 87.5 MHz (10 kHz units)
+FMTOP	= ^D10800		; band top   = 108.0 MHz
+FMSTRT	= ^D9340		; start frequency = 93.4 MHz
+CONRCS	= 177560		; console receiver status (bit 7 = char ready)
+CONRBF	= 177562		; console receiver buffer
+
+START:	MOV	#1000, SP
+	JSR	PC, LCDINI	; bring up the display
+	MOV	#1, R0		; backlight on
+	JSR	PC, LCDLED
+	JSR	PC, FMINIT	; bring up the tuner
+
+	MOV	#FMSTRT, FREQU	; tune the start frequency
+	MOV	FREQU, R0
+	JSR	PC, FMTUNE
+
+LOOP:	JSR	PC, DFILL	; blank the 10-cell line
+	MOV	FREQU, R0
+	JSR	PC, RFREQ	; lay "xxx.x" into cells 0..
+	JSR	PC, FMRD	; refresh status
+	JSR	PC, FMLEV	; R0 = signal level 0..15
+	JSR	PC, RSIG	; lay the level, right-aligned, into cell 9
+	MOV	#DBUF, R0	; push the whole line at once
+	CLR	R1
+	JSR	PC, LCDSTR
+	JSR	PC, RWAIT	; ~150 ms, polling the console
+	MOV	R0, R1
+	CMP	R1, #-1		; no key
+	BEQ	LOOP
+	CMP	R1, #53		; '+' -> up 0.1 MHz
+	BEQ	RUP
+	CMP	R1, #165	; 'u'
+	BEQ	RUP
+	CMP	R1, #55		; '-' -> down 0.1 MHz
+	BEQ	RDN
+	CMP	R1, #144	; 'd'
+	BEQ	RDN
+	CMP	R1, #56		; '.' -> fine up 0.01 MHz
+	BEQ	RFUP
+	CMP	R1, #54		; ',' -> fine down 0.01 MHz
+	BEQ	RFDN
+	JSR	PC, SEEKNX	; any other key -> seek up
+	BR	LOOP
+
+RUP:	MOV	#^D10, R0	; coarse up   (0.1 MHz)
+	BR	RTUP
+RFUP:	MOV	#1, R0		; fine up     (0.01 MHz)
+RTUP:	ADD	FREQU, R0
+	CMP	R0, #FMTOP
+	BLE	RUP1
+	MOV	#FMTOP, R0
+RUP1:	MOV	R0, FREQU
+	JSR	PC, FMTUNE
+	BR	LOOP
+
+RDN:	MOV	#^D10, R0	; coarse down (0.1 MHz)
+	BR	RTDN
+RFDN:	MOV	#1, R0		; fine down   (0.01 MHz)
+RTDN:	MOV	FREQU, R1
+	SUB	R0, R1
+	MOV	R1, R0
+	CMP	R0, #FMBOT
+	BGE	RDN1
+	MOV	#FMBOT, R0
+RDN1:	MOV	R0, FREQU
+	JSR	PC, FMTUNE
+	BR	LOOP
+
+; ---- seek the next station up, wrapping at the band top -----------
+
+SEEKNX:	MOV	FREQU, R0
+	ADD	#^D20, R0	; start 0.2 MHz past the current station
+	CMP	R0, #FMTOP
+	BLE	SKNX1
+	MOV	#FMBOT, R0	; already near the top -> wrap
+SKNX1:	JSR	PC, FMSEEK
+	MOV	R0, FREQU
+	BITB	#100, TEARD+0	; band-limit flag: no station before the top?
+	BEQ	SKNX2
+	MOV	#FMBOT, R0	; wrap to the bottom and seek again
+	JSR	PC, FMSEEK
+	MOV	R0, FREQU
+SKNX2:	RTS	PC
+
+; ---- blank the line: 10 cells of space, then a NUL terminator ------
+
+DFILL:	MOV	#DBUF, R0
+	MOV	#^D10, R1
+DFIL1:	MOVB	#40, (R0)+	; ' '
+	SOB	R1, DFIL1
+	CLRB	(R0)		; NUL after cell 9
+	RTS	PC
+
+; ---- render frequency (R0 = 10 kHz units) as "xxx.xx" from cell 0 --
+; writes only the frequency cells; leaves the rest of DBUF as spaces
+
+RFREQ:	CLR	R2
+	MOV	R0, R3
+	DIV	R2, #^D100	; R2 = whole MHz, R3 = remainder 0..99
+	MOV	R2, WHOLE
+	CLR	R2		; split the two decimals
+	DIV	R2, #^D10	; R2 = tenth, R3 = hundredth
+	MOV	R2, TENTH
+	MOV	R3, HUNDR
+	MOV	#DBUF, R4
+
+	MOV	WHOLE, R3	; hundreds digit
+	CLR	R2
+	DIV	R2, #^D100	; R2 = hundreds, R3 = remainder 0..99
+	MOV	R3, -(SP)
+	TST	R2
+	BEQ	RFRQ1
+	MOV	R2, R0
+	ADD	#60, R0
+	MOVB	R0, (R4)+
+RFRQ1:	MOV	(SP)+, R3	; tens and ones
+	CLR	R2
+	DIV	R2, #^D10	; R2 = tens, R3 = ones
+	MOV	R2, R0
+	ADD	#60, R0
+	MOVB	R0, (R4)+
+	MOV	R3, R0
+	ADD	#60, R0
+	MOVB	R0, (R4)+
+	MOVB	#56, (R4)+	; '.'
+	MOV	TENTH, R0
+	ADD	#60, R0
+	MOVB	R0, (R4)+	; tenth digit
+	MOV	HUNDR, R0
+	ADD	#60, R0
+	MOVB	R0, (R4)+	; hundredth digit
+	RTS	PC
+
+; ---- signal level R0 = 0..15, decimal, right-aligned ending cell 9 -
+
+RSIG:	CLR	R2
+	MOV	R0, R3
+	DIV	R2, #^D10	; R2 = tens (0 or 1), R3 = ones
+	MOV	R3, R0
+	ADD	#60, R0
+	MOVB	R0, DBUF+^D9	; ones on the 10th digit
+	TST	R2
+	BEQ	RSIG1
+	MOV	R2, R0
+	ADD	#60, R0
+	MOVB	R0, DBUF+^D8	; tens on the 9th digit
+RSIG1:	RTS	PC
+
+; ---- wait ~150 ms, polling the console; R0 = char or -1 if none ----
+
+RWAIT:	MOV	#^D30, R2	; 30 chunks of ~5 ms
+RWA1:	BITB	#200, @#CONRCS	; receiver DONE?
+	BNE	RWA2
+	MOV	#^D2500, R3	; ~5 ms chunk
+RWA3:	SOB	R3, RWA3
+	SOB	R2, RWA1
+	MOV	#-1, R0		; no key
+	RTS	PC
+RWA2:	MOVB	@#CONRBF, R0	; the char (clears DONE)
+	BIC	#177400, R0	; MOVB sign-extends; keep the byte
+	RTS	PC
+
+; ---- state ---------------------------------------------------------
+
+FREQU:	.WORD	0		; tuned frequency, 10 kHz units
+WHOLE:	.WORD	0
+TENTH:	.WORD	0
+HUNDR:	.WORD	0
+DBUF:	.BLKB	^D11		; 10 display cells + NUL
+	.EVEN
+
+	.INCLUDE "../i2c/i2c.mac"
+	.INCLUDE "../tea5767/tea5767.mac"
+	.INCLUDE "../dm8ba10/dm8ba10.mac"
+
+	.END	START

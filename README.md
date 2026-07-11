@@ -7,6 +7,9 @@ MACRO-11 projects for the DCJ-11 SBC and Multi IO card by Peter Schranz
 |---|---|
 | `dm8ba10/` | Driver for the DM8BA10 10-digit 16-segment LCD panel (TM1622), plus a "Hello" example |
 | `max7219/` | Driver for chained 1088AS 8x8 LED matrix modules (MAX7219 / GC7219C), plus a "Hello" example |
+| `i2c/` | Software (bit-banged) I2C master on VIA port B |
+| `tea5767/` | TEA5767 FM radio driver (over i2c), plus a tune example |
+| `radio/` | FM radio project: TEA5767 tuner + display (MAX7219 matrix, or DM8BA10 LCD variant) |
 
 ## Toolchain
 
