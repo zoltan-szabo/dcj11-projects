@@ -1,0 +1,16 @@
+{
+  "build" : {
+    "autosave" : true,
+    "lstPageBreaks" : false,
+    "makeLst" : true,
+    "makeSym" : true,
+    "outputDir" : "."
+  },
+  "files" : [
+    "hello.mac"
+  ],
+  "main" : "hello.mac",
+  "name" : "undm8ba10",
+  "origin" : "1000",
+  "schema" : 1
+}

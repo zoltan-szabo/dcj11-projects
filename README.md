@@ -28,6 +28,13 @@ m11asm -b 1000 hello.mac
 then paste the `.oct` into J11Terminal's Octal Upload and start it with
 `1000G` from the ODT prompt.
 
+## Project files
+
+`*.prj` files are J11Terminal projects: a small JSON bundle of the sources,
+origin address, and build settings for a directory (e.g. `radio/radio-lcd.prj`).
+Paths inside are relative to the `.prj`, so the files are committed here.
+Generated output (`*.oct` `*.bin` `*.lst` `*.sym`) stays gitignored.
+
 ## License
 
 MIT — see LICENSE. Individual projects credit their upstream references
