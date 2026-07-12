@@ -42,34 +42,41 @@ Include `../i2c/i2c.mac` **before** `ds3231.mac`.
 m11asm -b 1000 demo.mac
 ```
 
-Upload `demo.oct`, then `1000G`. It pings the clock (prints `No DS3231 at 0x68`
-and halts if absent), then:
+Upload `demo.oct`, then `1000G` **in the general Terminal** (it uses VT cursor
+addressing, so the ODT console won't render it). It pings the clock (prints
+`No DS3231 at 0x68` and halts if absent), then:
 
-**Set-once by OSF.** It reads the oscillator-stop flag and asks
-`Set date/time? (y/n):`. Answer **y** to set the clock; answer **n** to keep the
-battery-backed running time — *unless* OSF says the clock lost power, in which
-case it insists on a fresh entry. So you set it once and it just runs across
-power cycles.
+**Set or read.** It asks `Set date/time? (y/n):`. Answer **y** to set the clock;
+decline and it reads the running (battery-backed) clock — **unless the DS3231
+reports it lost power (OSF set)**, in which case it insists on a fresh entry.
 
 **Interactive entry.** On a set it prompts `Enter DD/MM/YYYY HH:MM:SS:` and
 parses exactly 14 digits (any separators you type are ignored, so type it as
 shown). It also computes and stores the correct weekday. Enter the time in
 **NZST** (standard time) — see DST below.
 
-**NZ local-time display.** The RTC is kept on NZST; the display adds one hour
-during **NZDT** (last Sunday of September … first Sunday of April), rolling the
-date across midnight, and tags each line:
+**Big centre clock.** It clears the screen and draws `HH:MM:SS` in the middle
+with 5x5 block digits, plus a small `20YY-MM-DD  NZxT` line below:
 
 ```
-DS3231 clock - NZ time (alarm at :10)
-2026-07-12 14:30:07 NZST
+             DS3231 CLOCK
+
+  ##  ##  ## ## ##   ## #####
+ #  # # #  #  # # #   #     #
+  ##   #  ##  #  ##  ##  ####   ...(HH:MM:SS in block digits)
+
+           2026-07-12  NZST
 ```
+
+**NZ local time.** The RTC is kept on NZST; the display adds one hour during
+**NZDT** (last Sunday of September … first Sunday of April), rolling the date
+across midnight, and tags the line NZST/NZDT.
 
 The one-second tick is the DS3231's **1 Hz SQW** on PB2 — the loop waits for its
 falling edge rather than polling the seconds register. Alarm 1 matches
-`seconds = 10`, so `*ALARM*` prints once a minute at `:10`; with SQW on the pin
-the alarm doesn't drive it, but **A1F still sets** and the demo polls it over
-I2C, so tick and alarm coexist.
+`seconds = 10`, so `*ALARM*` flashes below the clock once a minute at `:10`;
+with SQW on the pin the alarm doesn't drive it, but **A1F still sets** and the
+demo polls it over I2C, so tick and alarm coexist.
 
 The weekday and DST boundaries use Sakamoto's algorithm; the 2000s form is exact
 for 2001–2099. Want the alarm to drive the pin (INT mode) or the AT24C32 EEPROM

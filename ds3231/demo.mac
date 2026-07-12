@@ -1,15 +1,16 @@
 ; demo.mac — DS3231 real-time clock over the console, NZ local time
 ;
-; On start it reads the DS3231's OSF flag (set when the clock has lost power)
-; and asks "Set date/time? (y/n)". Answer y — or the clock is invalid — and it
-; prompts for DD/MM/YYYY HH:MM:SS and sets the RTC. Otherwise it trusts the
-; running clock (battery-backed).
+; On start it asks "Set date/time? (y/n)". Answer y to enter DD/MM/YYYY HH:MM:SS
+; and set the RTC; decline and it reads the running (battery-backed) clock —
+; unless the DS3231 reports it lost power (OSF set), where it insists on a set.
 ;
-; The RTC is kept on NZST (standard time). Display converts to NZ local time:
-; +1 h during NZDT (last Sunday of September .. first Sunday of April), with the
-; weekday found by Sakamoto's algorithm. It prints "20YY-MM-DD HH:MM:SS NZxT"
-; once a second, in place, ticked by the 1 Hz SQW falling edge on PB2. Alarm 1
-; matches seconds = 10, so "*ALARM*" appears once a minute at :10.
+; Then it draws a big HH:MM:SS clock in the centre of the screen with 5x5 block
+; digits, using VT cursor addressing (needs the general Terminal, not the ODT
+; console). The RTC is kept on NZST; the display converts to NZ local time —
+; +1 h during NZDT (last Sunday of September .. first Sunday of April), weekday
+; by Sakamoto's algorithm — with a small date + zone line below. Ticked by the
+; 1 Hz SQW falling edge on PB2. Alarm 1 matches seconds = 10, so "*ALARM*"
+; flashes once a minute at :10.
 ;
 ; Assemble:	m11asm -b 1000 demo.mac
 ; Run:		1000G
@@ -21,6 +22,16 @@ XBUF	= 177566		; console transmit buffer
 RCSR	= 177560		; console receive status (bit 7 = char ready)
 RBUF	= 177562		; console receive buffer
 
+; big-clock layout, 1-based rows/cols on an 80x24 VT screen
+TITROW	= ^D3			; title
+TITCOL	= ^D35
+CLKROW	= ^D9			; big HH:MM:SS block (5 rows tall)
+CLKCOL	= ^D17
+DATEROW	= ^D16			; small date + zone line
+DATECOL	= ^D33
+ALMROW	= ^D18			; alarm line
+ALMCOL	= ^D37
+
 START:	MOV	#1000, SP
 	JSR	PC, RTCINI
 	MOV	#DS3231, R0		; is the clock there?
@@ -31,7 +42,7 @@ START:	MOV	#1000, SP
 	JSR	PC, PMSG
 	HALT
 
-FOUND:	JSR	PC, RTCAF		; status; bit 7 = OSF (lost power)
+FOUND:	JSR	PC, RTCAF		; status; bit 7 = OSF (clock lost power)
 	MOV	R0, R4			; keep it across the prompt (i2c saves R4)
 	MOV	#MSETQ, R1
 	JSR	PC, PMSG
@@ -43,26 +54,35 @@ FOUND:	JSR	PC, RTCAF		; status; bit 7 = OSF (lost power)
 	BEQ	DOSET
 	CMP	R5, #131		; 'Y'
 	BEQ	DOSET
-	BIT	#200, R4		; declined; was the clock stopped?
-	BEQ	RUN			; no -> keep the running time
-	MOV	#MLOST, R1		; yes -> must set it
+	BIT	#200, R4		; declined; had the clock stopped?
+	BEQ	RUN			; no -> read the running time
+	MOV	#MLOST, R1		; yes -> it lost power, must set it
 	JSR	PC, PMSG
 DOSET:	JSR	PC, SETUP
-RUN:	JSR	PC, RTCACL		; clear OSF + alarm flags
+RUN:	JSR	PC, RTCACL		; clear alarm flags (and OSF)
 	MOV	#A1BUF, R1		; arm Alarm 1
 	JSR	PC, RTCA1
-	MOV	#MHEAD, R1
-	JSR	PC, PMSG
+	JSR	PC, SCRINI		; clear screen, hide cursor, draw the title
 
 LOOP:	JSR	PC, WAITTK		; one 1 Hz tick
 	MOV	#TIMBUF, R1
 	JSR	PC, RTCGET
 	JSR	PC, CVTBIN		; BCD -> binary working set
 	JSR	PC, DSTADJ		; +1 h if NZDT; sets DSTFLG
-	JSR	PC, PTIME
+	JSR	PC, BIGCLK		; big HH:MM:SS in the centre
+	JSR	PC, DATELN		; small date + zone below it
 	JSR	PC, RTCAF
 	BIT	#1, R0			; A1F?
-	BEQ	LOOP
+	BNE	ALMON
+	MOV	#ALMROW, R1		; no alarm: clear the alarm line
+	MOV	#ALMCOL, R2
+	JSR	PC, GOTOXY
+	MOV	#MCLEAR, R1
+	JSR	PC, PMSG
+	BR	LOOP
+ALMON:	MOV	#ALMROW, R1
+	MOV	#ALMCOL, R2
+	JSR	PC, GOTOXY
 	MOV	#MALARM, R1
 	JSR	PC, PMSG
 	JSR	PC, RTCACL
@@ -334,12 +354,81 @@ BCD2B:	BIC	#177400, R0
 	ADD	R1, R0
 	RTS	PC
 
-; ==== console output ==============================================
+; ==== big-clock display ===========================================
 
-; print "20YY-MM-DD HH:MM:SS NZxT" from the binary set, in place
+; clear the screen, hide the cursor, draw the title
 
-PTIME:	MOV	#15, R0			; CR overwrites the same line
+SCRINI:	MOV	#MCLS, R1
+	JSR	PC, PMSG
+	MOV	#TITROW, R1
+	MOV	#TITCOL, R2
+	JSR	PC, GOTOXY
+	MOV	#MTITLE, R1
+	JSR	PC, PMSG
+	RTS	PC
+
+; draw HH:MM:SS (BHOUR/BMIN/BSEC) as 5x5 block digits, centred
+
+BIGCLK:	MOVB	BHOUR, R0		; glyph indices -> GBUF
+	JSR	PC, SPLIT
+	MOVB	R2, GBUF+0
+	MOVB	R3, GBUF+1
+	MOVB	#^D10, GBUF+2		; colon glyph
+	MOVB	BMIN, R0
+	JSR	PC, SPLIT
+	MOVB	R2, GBUF+3
+	MOVB	R3, GBUF+4
+	MOVB	#^D10, GBUF+5
+	MOVB	BSEC, R0
+	JSR	PC, SPLIT
+	MOVB	R2, GBUF+6
+	MOVB	R3, GBUF+7
+	CLR	R4			; row 0..4
+BCROW:	MOV	R4, R1			; rowoff = R4 * 5
+	ASH	R1, #2
+	ADD	R4, R1
+	MOV	R1, ROWOFF
+	MOV	#CLKROW, R1		; cursor to (CLKROW+R4, CLKCOL)
+	ADD	R4, R1
+	MOV	#CLKCOL, R2
+	JSR	PC, GOTOXY
+	MOV	#GBUF, R5		; walk the 8 glyphs
+	MOV	#^D8, R3
+BCGLY:	MOVB	(R5)+, R0
+	ASL	R0			; * 2 into the pointer table
+	MOV	GLYPHS(R0), R1
+	ADD	ROWOFF, R1		; this glyph's row
+	MOVB	(R1)+, R0
 	JSR	PC, PUTC
+	MOVB	(R1)+, R0
+	JSR	PC, PUTC
+	MOVB	(R1)+, R0
+	JSR	PC, PUTC
+	MOVB	(R1)+, R0
+	JSR	PC, PUTC
+	MOVB	(R1)+, R0
+	JSR	PC, PUTC
+	MOV	#40, R0			; gap between digits
+	JSR	PC, PUTC
+	SOB	R3, BCGLY
+	INC	R4
+	CMP	R4, #^D5
+	BLT	BCROW
+	RTS	PC
+
+; split a binary byte R0 (0..99) -> R2 = tens, R3 = units
+
+SPLIT:	BIC	#177400, R0
+	CLR	R2
+	MOV	R0, R3
+	DIV	R2, #^D10
+	RTS	PC
+
+; small "20YY-MM-DD  NZxT" line below the clock
+
+DATELN:	MOV	#DATEROW, R1
+	MOV	#DATECOL, R2
+	JSR	PC, GOTOXY
 	MOV	#62, R0			; '2'
 	JSR	PC, PUTC
 	MOV	#60, R0			; '0'
@@ -354,27 +443,36 @@ PTIME:	MOV	#15, R0			; CR overwrites the same line
 	JSR	PC, PUTC
 	MOVB	BDAY, R0
 	JSR	PC, PB2
-	MOV	#40, R0			; ' '
+	MOV	#40, R0			; two spaces
 	JSR	PC, PUTC
-	MOVB	BHOUR, R0
-	JSR	PC, PB2
-	MOV	#72, R0			; ':'
-	JSR	PC, PUTC
-	MOVB	BMIN, R0
-	JSR	PC, PB2
-	MOV	#72, R0
-	JSR	PC, PUTC
-	MOVB	BSEC, R0
-	JSR	PC, PB2
-	MOV	#40, R0			; ' '
+	MOV	#40, R0
 	JSR	PC, PUTC
 	TSTB	DSTFLG
-	BEQ	PTST
+	BEQ	DLST
 	MOV	#MNZDT, R1
-	BR	PTP
-PTST:	MOV	#MNZST, R1
-PTP:	JSR	PC, PMSG
+	BR	DLP
+DLST:	MOV	#MNZST, R1
+DLP:	JSR	PC, PMSG
 	RTS	PC
+
+; position the cursor: R1 = row, R2 = col (1-based, printed as 2 digits)
+
+GOTOXY:	MOV	R2, -(SP)		; save col
+	MOV	#33, R0			; ESC
+	JSR	PC, PUTC
+	MOV	#133, R0		; '['
+	JSR	PC, PUTC
+	MOV	R1, R0			; row
+	JSR	PC, PB2
+	MOV	#73, R0			; ';'
+	JSR	PC, PUTC
+	MOV	(SP)+, R0		; col
+	JSR	PC, PB2
+	MOV	#110, R0		; 'H'
+	JSR	PC, PUTC
+	RTS	PC
+
+; ==== console output ==============================================
 
 ; print binary byte R0 (0..99) as two decimal digits
 
@@ -428,7 +526,9 @@ BDAY:	.BYTE	0
 BMON:	.BYTE	0
 BYEAR:	.BYTE	0
 DSTFLG:	.BYTE	0
+GBUF:	.BLKB	^D8			; 8 glyph indices for the big clock
 	.EVEN
+ROWOFF:	.WORD	0			; current font-row offset
 
 DOWTAB:	.BYTE	0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4
 DIMTAB:	.BYTE	^D31, ^D28, ^D31, ^D30, ^D31, ^D30, ^D31, ^D31, ^D30, ^D31, ^D30, ^D31
@@ -440,19 +540,85 @@ MENTER:	.ASCII	|Enter DD/MM/YYYY HH:MM:SS: |
 	.BYTE	0
 MERR:	.ASCII	/Need 14 digits - try again/
 	.BYTE	15, 12, 0
-MLOST:	.ASCII	/Clock was not running/
-	.BYTE	15, 12, 0
-MHEAD:	.ASCII	/DS3231 clock - NZ time (alarm at :10)/
-	.BYTE	15, 12, 0
-MALARM:	.BYTE	40
-	.ASCII	/*ALARM*/
+MLOST:	.ASCII	/Clock lost power - please set the time/
 	.BYTE	15, 12, 0
 MNONE:	.ASCII	/No DS3231 at 0x68/
 	.BYTE	15, 12, 0
+MTITLE:	.ASCII	/DS3231 CLOCK/
+	.BYTE	0
+MCLS:	.BYTE	033			; ESC [ 2 J    ESC [ ? 2 5 l
+	.ASCII	/[2J/
+	.BYTE	033
+	.ASCII	/[?25l/
+	.BYTE	0
+MALARM:	.ASCII	/*ALARM*/
+	.BYTE	0
+MCLEAR:	.ASCII	/       /		; 7 spaces to erase the alarm line
+	.BYTE	0
 MNZDT:	.ASCII	/NZDT/
 	.BYTE	0
 MNZST:	.ASCII	/NZST/
 	.BYTE	0
+	.EVEN
+
+; ---- 5x5 block-digit font: 0-9 then colon ------------------------
+
+GLYPHS:	.WORD	BD0, BD1, BD2, BD3, BD4, BD5, BD6, BD7, BD8, BD9, BCOL
+BD0:	.ASCII	/#####/
+	.ASCII	/#   #/
+	.ASCII	/#   #/
+	.ASCII	/#   #/
+	.ASCII	/#####/
+BD1:	.ASCII	/  #  /
+	.ASCII	/  #  /
+	.ASCII	/  #  /
+	.ASCII	/  #  /
+	.ASCII	/  #  /
+BD2:	.ASCII	/#####/
+	.ASCII	/    #/
+	.ASCII	/#####/
+	.ASCII	/#    /
+	.ASCII	/#####/
+BD3:	.ASCII	/#####/
+	.ASCII	/    #/
+	.ASCII	/#####/
+	.ASCII	/    #/
+	.ASCII	/#####/
+BD4:	.ASCII	/#   #/
+	.ASCII	/#   #/
+	.ASCII	/#####/
+	.ASCII	/    #/
+	.ASCII	/    #/
+BD5:	.ASCII	/#####/
+	.ASCII	/#    /
+	.ASCII	/#####/
+	.ASCII	/    #/
+	.ASCII	/#####/
+BD6:	.ASCII	/#####/
+	.ASCII	/#    /
+	.ASCII	/#####/
+	.ASCII	/#   #/
+	.ASCII	/#####/
+BD7:	.ASCII	/#####/
+	.ASCII	/    #/
+	.ASCII	/   # /
+	.ASCII	/  #  /
+	.ASCII	/  #  /
+BD8:	.ASCII	/#####/
+	.ASCII	/#   #/
+	.ASCII	/#####/
+	.ASCII	/#   #/
+	.ASCII	/#####/
+BD9:	.ASCII	/#####/
+	.ASCII	/#   #/
+	.ASCII	/#####/
+	.ASCII	/    #/
+	.ASCII	/#####/
+BCOL:	.ASCII	/     /
+	.ASCII	/  #  /
+	.ASCII	/     /
+	.ASCII	/  #  /
+	.ASCII	/     /
 	.EVEN
 
 	.INCLUDE "../i2c/i2c.mac"
