@@ -1,0 +1,60 @@
+; mmu.mac — DCJ-11 memory management: 22-bit mapping and a movable window
+;
+; The J-11 (DCJ-11) has an on-chip MMU that maps the 16-bit virtual address
+; (64 KB) onto a 22-bit physical address (4 MB). The 64 KB space is eight
+; 8 KB pages; each page n has a PAR (physical base, in 64-byte blocks) and a
+; PDR (access + length). Physical = PAF*0100 + offset-in-page.
+;
+; MMUON installs an identity map (virtual = physical for the low 64 KB, with
+; page 7 pointed at the 22-bit I/O page) and turns relocation on, so code that
+; was already running is unaffected. WINDOW then re-points ONE page (page 6,
+; virtual 140000) anywhere in physical memory, giving a sliding 8 KB view of
+; RAM above 64 KB. Never re-point the page holding your code or your stack.
+;
+; Kernel-mode registers only (the mode ODT leaves the machine in). I and D
+; space are left unified, so only the I-space PARs/PDRs are set.
+;
+; Runs on the DCJ-11 SBC + Multi IO card by Peter Schranz:
+;	https://www.5volts.ch/pages/dcj11sbc/
+; MMU behaviour per the PDP-11 architecture (KDJ11/11-70 memory management).
+
+MMR0	= 177572		; MMU status; bit 0 = enable relocation
+MMR3	= 172516		; bit 4 (020) = 22-bit mapping
+KIPAR0	= 172340		; kernel I-space page address registers (0..7)
+KIPDR0	= 172300		; kernel I-space page descriptor registers (0..7)
+
+WINPAG	= 6			; virtual page used as the movable window
+WINVA	= 140000		; its virtual base (WINPAG * 020000)
+; MACRO-11 evaluates left to right with no precedence, so multiply first.
+WINPAR	= WINPAG*2 + KIPAR0	; that page's PAR
+
+PDRRW	= 077406		; full 8 KB page, read/write, expand upward
+
+; ---- enable the MMU with an identity map (clobbers R0, R1, R2) ------
+
+MMUON:	MOV	#20, @#MMR3	; 22-bit physical mapping
+	MOV	#KIPDR0, R0	; every page: full 8 KB, read/write
+	MOV	#^D8, R1
+MMU1:	MOV	#PDRRW, (R0)+
+	SOB	R1, MMU1
+	MOV	#KIPAR0, R0	; pages 0..6 map straight through
+	CLR	R2
+	MOV	#^D7, R1
+MMU2:	MOV	R2, (R0)+
+	ADD	#200, R2	; +0200 blocks = +8 KB
+	SOB	R1, MMU2
+	MOV	#177600, (R0)	; page 7 -> 22-bit I/O page (17760000)
+	MOV	#1, @#MMR0	; relocation on
+	RTS	PC
+
+; ---- back to plain 16-bit addressing -------------------------------
+
+MMUOFF:	CLR	@#MMR0
+	RTS	PC
+
+; ---- point the window at physical block R0 (PAF) -------------------
+; Physical byte address = R0 * 0100. For an 8 KB bank k, R0 = k*0200.
+; Afterwards WINVA .. WINVA+17777 accesses that 8 KB of physical memory.
+
+WINDOW:	MOV	R0, @#WINPAR
+	RTS	PC

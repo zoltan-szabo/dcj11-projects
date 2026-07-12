@@ -10,6 +10,7 @@ MACRO-11 projects for the DCJ-11 SBC and Multi IO card by Peter Schranz
 | `i2c/` | Software (bit-banged) I2C master on VIA port B |
 | `tea5767/` | TEA5767 FM radio driver (over i2c), plus a tune example |
 | `radio/` | FM radio project: TEA5767 tuner + display (MAX7219 matrix, or DM8BA10 LCD variant) |
+| `mmu/` | Memory management: enable 22-bit mapping and window physical RAM above 64 KB, plus a self-checking demo |
 
 ## Toolchain
 

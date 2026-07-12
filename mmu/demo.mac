@@ -1,0 +1,88 @@
+; demo.mac — prove we can read and write physical memory above 64 KB
+;
+; Enables the MMU, then writes a distinct signature word into four 8 KB banks
+; that all live above the low 64 KB, re-reads each through the window, and
+; reports PASS only if every bank returned its own value. Aliasing (no real
+; high RAM) would make the later writes clobber the earlier ones and fail.
+;
+; The SBC has 512 kW = 1 MB = 128 banks of 8 KB (physical 0..3777777); the low
+; 64 KB is banks 0..7, so banks 8, 32, 64, 96 are all comfortably high RAM.
+;
+; Assemble:	m11asm -b 1000 demo.mac
+; Run:		1000G   (watch the console/terminal for PASS or FAIL)
+
+.	= 001000
+
+NBANK	= 4			; how many high banks to test
+XCSR	= 177564		; console transmitter status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+
+START:	MOV	#1000, SP
+	JSR	PC, MMUON
+	MOV	#MSG0, R1
+	JSR	PC, PMSG
+
+	; write a distinct signature (the bank number) into each high bank
+	MOV	#BANKS, R4
+	MOV	#NBANK, R5
+WR:	MOV	(R4)+, R0	; bank index k (>= 8: above the low 64 KB)
+	MOV	R0, R3		; signature = k
+	JSR	PC, BANKW	; slide the window onto that bank
+	MOV	R3, @#WINVA	; store it at the window base
+	SOB	R5, WR
+
+	; read each bank back through the window and compare
+	MOV	#BANKS, R4
+	MOV	#NBANK, R5
+RD:	MOV	(R4)+, R0
+	MOV	R0, R3
+	JSR	PC, BANKW
+	CMP	@#WINVA, R3	; still our own signature?
+	BNE	FAIL
+	SOB	R5, RD
+
+	MOV	#MSGOK, R1	; every bank held its own value
+	JSR	PC, PMSG
+	JSR	PC, MMUOFF
+	HALT
+
+FAIL:	MOV	#MSGNO, R1
+	JSR	PC, PMSG
+	JSR	PC, MMUOFF
+	HALT
+
+; ---- window the 8 KB bank whose index is in R0 (PAF = R0 * 0200) ----
+
+BANKW:	MOV	R0, -(SP)
+	ASH	R0, #7		; * 0200  (m11asm EIS order: register, count)
+	JSR	PC, WINDOW
+	MOV	(SP)+, R0
+	RTS	PC
+
+; ---- print the ASCIZ string at R1 (clobbers R0, R1) ----------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMS2
+PMS1:	TSTB	@#XCSR		; transmitter ready?
+	BPL	PMS1
+	MOVB	R0, @#XBUF
+	BR	PMSG
+PMS2:	RTS	PC
+
+; ---- data -----------------------------------------------------------
+
+	.EVEN
+BANKS:	.WORD	^D8, ^D32, ^D64, ^D96
+
+MSG0:	.BYTE	15, 12
+	.ASCII	/MMU on - testing RAM above 64K/
+	.BYTE	15, 12, 0
+MSGOK:	.ASCII	/PASS - high memory reads back correctly/
+	.BYTE	15, 12, 0
+MSGNO:	.ASCII	/FAIL - high memory mismatch/
+	.BYTE	15, 12, 0
+	.EVEN
+
+	.INCLUDE /mmu.mac/
+
+	.END	START

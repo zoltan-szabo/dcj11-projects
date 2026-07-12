@@ -3,6 +3,21 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## MMU project (2026-07-11)
+
+`mmu/mmu.mac` brings up the J-11 on-chip memory management to reach RAM above
+the 16-bit 64 KB limit. `MMUON` installs an identity map (page 7 → 22-bit I/O
+page) and turns on 22-bit relocation so running code is unaffected; `WINDOW`
+re-points page 6 (virtual 140000) at any physical block, giving a sliding 8 KB
+view of the 512 kW (1 MB, 128 banks) physical space. `mmu/demo.mac` writes a
+distinct signature into four high banks (8, 32, 64, 96) and reads them back
+through the window, printing PASS/FAIL on the console — a mismatch would mean
+the high addresses aliased instead of being real distinct RAM.
+
+Gotcha found and documented: MACRO-11 (and m11asm) evaluate expressions left to
+right with no operator precedence, so `KIPAR0 + WINPAG*2` computed
+`(KIPAR0 + WINPAG)*2`. Written as `WINPAG*2 + KIPAR0` instead.
+
 ## I2C, TEA5767 and radio project (2026-07-11)
 
 Three layered projects. `i2c/i2c.mac` is a bit-banged I2C master on VIA
