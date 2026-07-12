@@ -3,6 +3,22 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## DS3231 RTC project (2026-07-12)
+
+`ds3231/ds3231.mac` drives the DS3231 I2C real-time clock on top of the
+`i2c/` master — register blocks are read/written through the I2C layer, and the
+VIA is touched directly only to read the SQW pin (PB2, a DS3231 output). API:
+`RTCINI` (SQW = 1 Hz, oscillator on, flags cleared), `RTCSET`/`RTCGET` (7-byte
+BCD time), `RTCA1` (Alarm 1), `RTCAF`/`RTCACL` (alarm flags), `RTCSQ` (SQW
+level). The DS3231 address is fixed at 0x68; A0–A2 on ZS-042 modules belong to
+the AT24C32 EEPROM, not the clock.
+
+`ds3231/demo.mac` sets the clock and Alarm 1, then prints `20YY-MM-DD HH:MM:SS`
+once a second updating in place, using the 1 Hz SQW falling edge on PB2 as the
+tick (no polling the seconds register just to find it). With SQW on the pin the
+alarm doesn't drive it, but A1F still sets, so the demo polls the flag over I2C
+and prints `*ALARM*` at :10 — SQW-tick and alarms coexist.
+
 ## MMU project (2026-07-11)
 
 `mmu/mmu.mac` brings up the J-11 on-chip memory management to reach RAM above

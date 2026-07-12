@@ -1,0 +1,145 @@
+; ds3231.mac — DS3231 I2C real-time clock driver for the DCJ-11
+;
+; Uses the software I2C master in ../i2c/i2c.mac for all register access, so it
+; touches the VIA directly only for the SQW pin (a DS3231 output, read on the
+; VIA as an input). Include i2c.mac BEFORE this file.
+;
+; Wiring (Multi IO card, port B):
+;	SDA - PB0	SCL - PB1	(the I2C bus)
+;	SQW - PB2	(DS3231 square-wave/interrupt output -> VIA input)
+;
+; The DS3231 address is FIXED at 0x68 (it has no A0-A2 pins; on ZS-042 style
+; modules those pads belong to the separate AT24C32 EEPROM at 0x57).
+;
+; All times are BCD, 24-hour. Date/time and alarm buffers are 7 and 4 bytes:
+;	time:  sec min hour dow date month year
+;	alarm: sec min hour day/date  (bit 7 of each = its alarm-mask bit)
+;
+; API (clobber R0-R3 unless noted; preserve R4/R5 via the i2c layer):
+;	RTCINI	init: I2C up, SQW = 1 Hz, oscillator on (leaves the status flags
+;		alone so the caller can test OSF for a lost-power cold start)
+;	RTCSET	R1 -> 7-byte time buffer, written to the clock
+;	RTCGET	R1 -> 7-byte buffer, filled from the clock
+;	RTCA1	R1 -> 4-byte Alarm 1 buffer, written to the clock
+;	RTCAF	returns R0 = status register (bit 0 = A1F, bit 1 = A2F)
+;	RTCACL	clear the alarm flags
+;	RTCSQ	returns R0 = SQW pin level (0 low, non-zero high)
+;
+; Runs on the DCJ-11 SBC + Multi IO card by Peter Schranz:
+;	https://www.5volts.ch/pages/dcj11sbc/
+
+DS3231	= 150			; 0x68, 7-bit address (for I2CPING)
+RTCWA	= 320			; 0xD0, address + write bit
+RTCRA	= 321			; 0xD1, address + read bit
+
+RSEC	= 0			; register map
+RMIN	= 1
+RHOUR	= 2
+RDOW	= 3
+RDATE	= 4
+RMON	= 5
+RYEAR	= 6
+RA1S	= 7			; Alarm 1, first of four registers
+RCTL	= 016			; 0x0E control
+RSTAT	= 017			; 0x0F status
+
+RTCSQW	= 4			; SQW on PB2
+
+; ---- initialise: bus, SQW = 1 Hz, oscillator on --------------------
+; Leaves the status register untouched: the caller reads OSF first (via
+; RTCAF) to tell a lost-power cold start from a still-running clock, then
+; clears the flags with RTCACL once it has dealt with them.
+
+RTCINI:	JSR	PC, I2CINI
+	BIC	#RTCSQW, @#VIADRB	; PB2 an input: the DS3231 drives SQW
+	MOV	#RCTL, R0
+	MOV	#0, R1			; osc on, 1 Hz SQW, alarms off the pin
+	JSR	PC, RTCPB
+	RTS	PC
+
+; ---- date/time: R1 -> 7-byte buffer -------------------------------
+
+RTCSET:	MOV	#RSEC, R0
+	MOV	#^D7, R2
+	JSR	PC, RTCWR
+	RTS	PC
+
+RTCGET:	MOV	#RSEC, R0
+	MOV	#^D7, R2
+	JSR	PC, RTCRD
+	RTS	PC
+
+; ---- Alarm 1: R1 -> 4-byte buffer ---------------------------------
+
+RTCA1:	MOV	#RA1S, R0
+	MOV	#^D4, R2
+	JSR	PC, RTCWR
+	RTS	PC
+
+; ---- status / alarm flags -----------------------------------------
+
+RTCAF:	MOV	#RSTAT, R0
+	MOV	#RTCTMP, R1
+	MOV	#1, R2
+	JSR	PC, RTCRD
+	MOVB	RTCTMP, R0
+	BIC	#177400, R0
+	RTS	PC
+
+RTCACL:	MOV	#RSTAT, R0
+	MOV	#0, R1			; writing 0 clears A1F/A2F
+	JSR	PC, RTCPB
+	RTS	PC
+
+; ---- SQW pin level (PB2) ------------------------------------------
+
+RTCSQ:	MOVB	@#VIAORB, R0
+	BIC	#177773, R0		; keep bit 2 only
+	RTS	PC
+
+; ---- register block write: R0 = start reg, R1 = buf, R2 = count ---
+
+RTCWR:	MOV	R0, -(SP)		; save the start register
+	JSR	PC, I2CSTA
+	MOV	#RTCWA, R0
+	JSR	PC, I2CWR
+	MOV	(SP)+, R0		; set the register pointer
+	JSR	PC, I2CWR
+RTCWR1:	MOVB	(R1)+, R0
+	JSR	PC, I2CWR
+	SOB	R2, RTCWR1
+	JSR	PC, I2CSTO
+	RTS	PC
+
+; ---- register block read: R0 = start reg, R1 = buf, R2 = count ----
+
+RTCRD:	MOV	R0, -(SP)		; save the start register
+	MOV	R1, R3			; buffer -> R3 (I2CRD preserves it)
+	JSR	PC, I2CSTA
+	MOV	#RTCWA, R0
+	JSR	PC, I2CWR
+	MOV	(SP)+, R0		; set the register pointer
+	JSR	PC, I2CWR
+	JSR	PC, I2CSTA		; repeated start for the read
+	MOV	#RTCRA, R0
+	JSR	PC, I2CWR
+RTCRD1:	MOV	#1, R1			; NACK the last byte...
+	CMP	R2, #1
+	BEQ	RTCRD2
+	CLR	R1			; ...ACK the rest
+RTCRD2:	JSR	PC, I2CRD
+	MOVB	R0, (R3)+
+	SOB	R2, RTCRD1
+	JSR	PC, I2CSTO
+	RTS	PC
+
+; ---- write one byte R1 to register R0 -----------------------------
+
+RTCPB:	MOVB	R1, RTCTMP
+	MOV	#RTCTMP, R1
+	MOV	#1, R2
+	JSR	PC, RTCWR
+	RTS	PC
+
+RTCTMP:	.BYTE	0
+	.EVEN
