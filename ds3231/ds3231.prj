@@ -8,6 +8,7 @@
   },
   "files" : [
     "demo.mac",
+    "clock.mac",
     "ds3231.mac"
   ],
   "main" : "demo.mac",

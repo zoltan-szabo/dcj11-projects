@@ -13,16 +13,16 @@ BCD time), `RTCA1` (Alarm 1), `RTCAF`/`RTCACL` (alarm flags), `RTCSQ` (SQW
 level). The DS3231 address is fixed at 0x68; A0–A2 on ZS-042 modules belong to
 the AT24C32 EEPROM, not the clock.
 
-`ds3231/demo.mac` sets the clock and Alarm 1, then draws a big `HH:MM:SS` clock
-in the centre of the screen with 5x5 block digits (VT cursor addressing, so it
-needs the general Terminal, not the ODT console) plus a small `20YY-MM-DD NZxT`
-line; `*ALARM*` flashes at :10. The tick is the 1 Hz SQW falling edge on PB2 (no
-polling the seconds register). On start it prompts to set the time; declining
-just reads the running clock, unless OSF reports the clock lost power, where it
-insists on a set. The RTC is kept on NZST; the display adds an hour during NZDT
-(last Sun Sep .. first Sun Apr, weekday by Sakamoto), rolling the date at
-midnight. With SQW on the pin the alarm doesn't drive it, but A1F still sets, so
-the demo polls the flag over I2C — tick and alarm coexist.
+Two demos share the driver. `ds3231/demo.mac` is the plain console clock —
+reads the RTC and prints `20YY-MM-DD HH:MM:SS NZxT` in place once a second.
+`ds3231/clock.mac` is the graphical version: a big centre `HH:MM:SS` in 5x5
+block digits (VT cursor addressing, so it needs the general Terminal, not the
+ODT console) with a small date/zone line and `*ALARM*` flashing at :10 — the
+base to grow alerts and timers on. Both prompt to set the time (declining reads
+the running clock, unless OSF reports it lost power, where it insists on a set),
+keep the RTC on NZST and convert to NZ local time (+1 h in NZDT, last Sun Sep ..
+first Sun Apr, weekday by Sakamoto, date rolls at midnight), and tick off the
+1 Hz SQW falling edge on PB2 (A1F polled over I2C, so tick and alarm coexist).
 
 ## MMU project (2026-07-11)
 

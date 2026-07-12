@@ -4,7 +4,9 @@ Driver and demo for the DS3231 I2C RTC (the TCXO one) on the Multi IO card,
 built on the software I2C master in [`../i2c/`](../i2c).
 
 - `ds3231.mac` — the driver (register access via i2c; SQW read directly)
-- `demo.mac` — sets the clock + an alarm and prints a live clock over serial
+- `demo.mac` — plain console clock: reads the RTC and prints a line each second
+- `clock.mac` — the fancy one: a big block-digit `HH:MM:SS` centred on a VT
+  terminal (needs the general Terminal); the base for alerts/timers later
 
 ## Wiring (port B)
 
@@ -36,27 +38,30 @@ alarm-mask bit).
 
 Include `../i2c/i2c.mac` **before** `ds3231.mac`.
 
-## Demo
+## Demos
 
-```
-m11asm -b 1000 demo.mac
-```
+Both share the driver and behave the same way except for the display. Assemble
+either with `m11asm -b 1000 <file>.mac`, upload, and `1000G`.
 
-Upload `demo.oct`, then `1000G` **in the general Terminal** (it uses VT cursor
-addressing, so the ODT console won't render it). It pings the clock (prints
-`No DS3231 at 0x68` and halts if absent), then:
+- **`demo.mac`** — plain console: prints `20YY-MM-DD HH:MM:SS NZxT` in place once
+  a second. Works in either view.
+- **`clock.mac`** — the fancy one: a big centre clock (below). Uses VT cursor
+  addressing, so run it **in the general Terminal**, not the ODT console. This
+  is the one to grow alerts and timers on.
 
-**Set or read.** It asks `Set date/time? (y/n):`. Answer **y** to set the clock;
-decline and it reads the running (battery-backed) clock — **unless the DS3231
-reports it lost power (OSF set)**, in which case it insists on a fresh entry.
+Both ping the clock first (`No DS3231 at 0x68` + halt if absent), then:
+
+**Set or read.** They ask `Set date/time? (y/n):`. Answer **y** to set the clock;
+decline and they read the running (battery-backed) clock — **unless the DS3231
+reports it lost power (OSF set)**, in which case they insist on a fresh entry.
 
 **Interactive entry.** On a set it prompts `Enter DD/MM/YYYY HH:MM:SS:` and
 parses exactly 14 digits (any separators you type are ignored, so type it as
 shown). It also computes and stores the correct weekday. Enter the time in
 **NZST** (standard time) — see DST below.
 
-**Big centre clock.** It clears the screen and draws `HH:MM:SS` in the middle
-with 5x5 block digits, plus a small `20YY-MM-DD  NZxT` line below:
+**Big centre clock (`clock.mac`).** It clears the screen and draws `HH:MM:SS` in
+the middle with 5x5 block digits, plus a small `20YY-MM-DD  NZxT` line below:
 
 ```
              DS3231 CLOCK
