@@ -1,0 +1,116 @@
+; at24c32.mac — AT24C32 (32 Kbit / 4 KB) I2C EEPROM driver for the DCJ-11
+;
+; Uses the software I2C master in ../i2c/i2c.mac for everything (no VIA access
+; of its own). Include i2c.mac BEFORE this file.
+;
+; The AT24C32 lives at 0x50..0x57 (A0-A2 select the low bits). It's the same
+; chip whether standalone or on a ZS-042 DS3231 module, where it defaults to
+; 0x57 (A0-A2 pulled high) — so only EEADDR changes. 4 KB of storage, 12-bit
+; address sent as two bytes (high byte's top nibble ignored), 32-byte pages.
+;
+; API (clobber R0-R3 unless noted; preserve R4/R5 via the i2c layer):
+;	EEPING	returns R0 = 0 if the EEPROM answers
+;	EEWRB	R0 = address, R1 = byte -> write one byte (waits the cycle)
+;	EEWR	R0 = address, R1 = buffer, R2 = count -> write a block
+;	EERDB	R0 = address -> returns R0 = byte
+;	EERD	R0 = address, R1 = buffer, R2 = count -> read a block
+;
+; Writes go byte-by-byte (each a full ~5 ms write cycle, ended by ACK polling),
+; which is simple and page-boundary-safe; reads are one sequential transfer.
+;
+; Runs on the DCJ-11 SBC + Multi IO card by Peter Schranz:
+;	https://www.5volts.ch/pages/dcj11sbc/
+
+EEADDR	= 127			; 0x57, 7-bit (ZS-042 default)
+EEWA	= EEADDR*2		; 0xAE, address + write bit
+EERA	= EEADDR*2+1		; 0xAF, address + read bit
+
+; ---- is the EEPROM there? R0 = 0 if it answers -------------------
+
+EEPING:	MOV	#EEADDR, R0
+	JSR	PC, I2CPING
+	RTS	PC
+
+; ---- write one byte: R0 = 16-bit address, R1 = data --------------
+
+EEWRB:	MOV	R0, R3			; keep the address (i2c saves R3)
+	JSR	PC, I2CSTA
+	MOV	#EEWA, R0
+	JSR	PC, I2CWR
+	MOV	R3, R0
+	SWAB	R0			; address[15:8] into the low byte
+	JSR	PC, I2CWR
+	MOV	R3, R0			; address[7:0]
+	JSR	PC, I2CWR
+	MOV	R1, R0			; the data byte
+	JSR	PC, I2CWR
+	JSR	PC, I2CSTO
+	JSR	PC, EEWAIT		; wait out the write cycle
+	RTS	PC
+
+; ---- write a block: R0 = address, R1 = buffer, R2 = count --------
+
+EEWR:	MOV	R0, EEADR		; running address
+	MOV	R1, R4			; buffer (i2c saves R4/R5)
+	MOV	R2, R5			; count
+EEWR1:	MOV	EEADR, R0
+	MOVB	(R4)+, R1
+	JSR	PC, EEWRB
+	INC	EEADR
+	SOB	R5, EEWR1
+	RTS	PC
+
+; ---- read one byte: R0 = address -> R0 = byte -------------------
+
+EERDB:	MOV	#EERDT, R1
+	MOV	#1, R2
+	JSR	PC, EERD
+	MOVB	EERDT, R0
+	BIC	#177400, R0
+	RTS	PC
+
+; ---- read a block: R0 = address, R1 = buffer, R2 = count --------
+
+EERD:	MOV	R1, R4			; buffer (R1 is the per-byte ACK flag below)
+	MOV	R2, R5			; count
+	MOV	R0, R3			; address
+	JSR	PC, I2CSTA		; dummy write to set the address pointer
+	MOV	#EEWA, R0
+	JSR	PC, I2CWR
+	MOV	R3, R0
+	SWAB	R0
+	JSR	PC, I2CWR		; address[15:8]
+	MOV	R3, R0
+	JSR	PC, I2CWR		; address[7:0]
+	JSR	PC, I2CSTA		; repeated start for the read
+	MOV	#EERA, R0
+	JSR	PC, I2CWR
+EERD1:	MOV	#1, R1			; NACK the last byte...
+	CMP	R5, #1
+	BEQ	EERD2
+	CLR	R1			; ...ACK the rest
+EERD2:	JSR	PC, I2CRD
+	MOVB	R0, (R4)+
+	SOB	R5, EERD1
+	JSR	PC, I2CSTO
+	RTS	PC
+
+; ---- ACK-poll until the write cycle finishes --------------------
+
+EEWAIT:	MOV	#^D1000, R2		; bounded, in case nothing answers
+EEW1:	JSR	PC, I2CSTA
+	MOV	#EEWA, R0
+	JSR	PC, I2CWR		; R0 = 0 once the device ACKs again
+	MOV	R0, -(SP)
+	JSR	PC, I2CSTO
+	MOV	(SP)+, R0
+	TST	R0
+	BEQ	EEW2			; ACK -> write done
+	SOB	R2, EEW1
+EEW2:	RTS	PC
+
+; ---- state -------------------------------------------------------
+
+EEADR:	.WORD	0			; running address for EEWR
+EERDT:	.BYTE	0			; one-byte read scratch
+	.EVEN

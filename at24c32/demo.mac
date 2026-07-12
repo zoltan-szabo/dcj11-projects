@@ -1,0 +1,93 @@
+; demo.mac — AT24C32 EEPROM write / read-back test over the console
+;
+; Writes a string to EEPROM address 0, reads it back into RAM, prints it, and
+; checks it matches. Proves the driver and the chip.
+;
+; Assemble:	m11asm -b 1000 demo.mac
+; Run:		1000G
+
+.	= 001000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+
+START:	MOV	#1000, SP
+	JSR	PC, I2CINI
+	JSR	PC, EEPING		; is the EEPROM there?
+	TST	R0
+	BEQ	FOUND
+	MOV	#MNONE, R1
+	JSR	PC, PMSG
+	HALT
+
+FOUND:	CLR	R0			; write TSTR (incl. NUL) to address 0
+	MOV	#TSTR, R1
+	MOV	#TLEN, R2
+	JSR	PC, EEWR
+
+	CLR	R0			; read it back into RDBUF
+	MOV	#RDBUF, R1
+	MOV	#TLEN, R2
+	JSR	PC, EERD
+
+	MOV	#MREAD, R1		; show what came back
+	JSR	PC, PMSG
+	MOV	#RDBUF, R1
+	JSR	PC, PMSG
+	JSR	PC, PCRLF
+
+	MOV	#TSTR, R1		; verify byte for byte
+	MOV	#RDBUF, R2
+	MOV	#TLEN, R3
+VFY:	CMPB	(R1)+, (R2)+
+	BNE	VFAIL
+	SOB	R3, VFY
+	MOV	#MPASS, R1
+	JSR	PC, PMSG
+	HALT
+VFAIL:	MOV	#MFAIL, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- console output ----------------------------------------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMS2
+	JSR	PC, PUTC
+	BR	PMSG
+PMS2:	RTS	PC
+
+PCRLF:	MOV	#15, R0
+	JSR	PC, PUTC
+	MOV	#12, R0
+	JSR	PC, PUTC
+	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+; ---- data --------------------------------------------------------
+
+	.EVEN
+TSTR:	.ASCIZ	/Hello from the AT24C32!/
+TLEN	= . - TSTR			; length including the NUL
+	.EVEN
+RDBUF:	.BLKB	^D32
+	.EVEN
+
+MREAD:	.ASCII	/Read back: /
+	.BYTE	0
+MPASS:	.ASCII	/PASS - EEPROM verifies/
+	.BYTE	15, 12, 0
+MFAIL:	.ASCII	/FAIL - read-back mismatch/
+	.BYTE	15, 12, 0
+MNONE:	.ASCII	/No AT24C32 at 0x57/
+	.BYTE	15, 12, 0
+	.EVEN
+
+	.INCLUDE "../i2c/i2c.mac"
+	.INCLUDE /at24c32.mac/
+
+	.END	START

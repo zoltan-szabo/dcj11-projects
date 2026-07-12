@@ -1,0 +1,17 @@
+{
+  "build" : {
+    "autosave" : true,
+    "lstPageBreaks" : false,
+    "makeLst" : true,
+    "makeSym" : true,
+    "outputDir" : "."
+  },
+  "files" : [
+    "demo.mac",
+    "at24c32.mac"
+  ],
+  "main" : "demo.mac",
+  "name" : "at24c32",
+  "origin" : "1000",
+  "schema" : 1
+}

@@ -3,6 +3,18 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## AT24C32 EEPROM project (2026-07-12)
+
+`at24c32/at24c32.mac` drives the AT24C32 (32 Kbit / 4 KB) I2C EEPROM on the
+`i2c/` master — pure I2C, no VIA. API: `EEPING`, `EEWRB`/`EEWR` (byte / block
+write), `EERDB`/`EERD` (byte / block read). 12-bit address sent as two bytes;
+writes go byte-by-byte, each a ~5 ms cycle ended by ACK polling (simple and
+page-safe; page writes are a future optimisation); reads are one sequential
+transfer. The chip is the same standalone or on a ZS-042 DS3231 module — only
+`EEADDR` differs (A0–A2 → 0x50..0x57; 0x57 on ZS-042). `at24c32/demo.mac` writes
+a string to address 0, reads it back, prints it, and verifies (PASS/FAIL).
+Addresses #1.
+
 ## DS3231 RTC project (2026-07-12)
 
 `ds3231/ds3231.mac` drives the DS3231 I2C real-time clock on top of the
