@@ -13,7 +13,8 @@ page-safe; page writes are a future optimisation); reads are one sequential
 transfer. The chip is the same standalone or on a ZS-042 DS3231 module — only
 `EEADDR` differs (A0–A2 → 0x50..0x57; 0x57 on ZS-042). `at24c32/demo.mac` writes
 a string to address 0, reads it back, prints it, and verifies (PASS/FAIL).
-Addresses #1.
+`at24c32/readonly.mac` reads address 0 only (no writing) — run it after a
+power-cycle to prove the EEPROM kept what demo.mac wrote. Closes #1.
 
 ## DS3231 RTC project (2026-07-12)
 

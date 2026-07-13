@@ -8,9 +8,10 @@
   },
   "files" : [
     "demo.mac",
+    "readonly.mac",
     "at24c32.mac"
   ],
-  "main" : "demo.mac",
+  "main" : "readonly.mac",
   "name" : "at24c32",
   "origin" : "1000",
   "schema" : 1

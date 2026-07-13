@@ -5,6 +5,7 @@ software I2C master in [`../i2c/`](../i2c). Pure I2C — no VIA access of its ow
 
 - `at24c32.mac` — the driver
 - `demo.mac` — writes a string, reads it back, and verifies
+- `readonly.mac` — reads address 0 only (no writing); proves persistence
 
 ## Where it is doesn't matter
 
@@ -48,6 +49,18 @@ and reports `PASS`/`FAIL`:
 ```
 Read back: Hello from the AT24C32!
 PASS - EEPROM verifies
+```
+
+## Persistence proof (`readonly.mac`)
+
+`readonly.mac` reads address 0 and prints it — **no writing at all**. Run
+`demo.mac` once to store the string, **power-cycle the board**, then run
+`readonly.mac`: the same string comes back though nothing wrote it this run, so
+the EEPROM genuinely kept it across power.
+
+```
+Stored: Hello from the AT24C32!
+PASS - EEPROM retained the data
 ```
 
 Runs on the DCJ-11 SBC + Multi IO card by Peter Schranz
