@@ -11,7 +11,7 @@
     "readonly.mac",
     "at24c32.mac"
   ],
-  "main" : "readonly.mac",
+  "main" : "demo.mac",
   "name" : "at24c32",
   "origin" : "1000",
   "schema" : 1
