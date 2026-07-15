@@ -1,0 +1,17 @@
+{
+  "build" : {
+    "autosave" : true,
+    "lstPageBreaks" : false,
+    "makeLst" : true,
+    "makeSym" : true,
+    "outputDir" : "."
+  },
+  "files" : [
+    "clock.mac",
+    "vqc10.mac"
+  ],
+  "main" : "clock.mac",
+  "name" : "vqc10",
+  "origin" : "1000",
+  "schema" : 1
+}

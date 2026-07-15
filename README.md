@@ -13,6 +13,7 @@ MACRO-11 projects for the DCJ-11 SBC and Multi IO card by Peter Schranz
 | `mmu/` | Memory management: enable 22-bit mapping and window physical RAM above 64 KB, plus a self-checking demo |
 | `ds3231/` | DS3231 I2C real-time clock driver (over i2c), plus a live serial-clock demo with alarm |
 | `at24c32/` | AT24C32 I2C EEPROM driver (over i2c), plus a write/read-back demo |
+| `vqc10/` | Pure driver for the DisplayVQC10 panel (two VQC10 5x7 LED matrix modules behind 74HC595s), plus a DS3231 clock demo |
 
 ## Toolchain
 

@@ -1,0 +1,453 @@
+; clock.mac — DS3231 clock on the VQC10 panel: HH:MM:SS on 8 LED digits
+;
+; The sample program for the vqc10 driver: reads the DS3231 (I2C on port B,
+; no clash with the panel on port A) and shows NZ local time on the panel's
+; eight 5x7 digits — "HH:MM:SS" is exactly eight characters.
+;
+; Start-up matches the ds3231 demos: reads the OSF flag (set when the clock
+; lost power) and asks "Set date/time? (y/n)" on the console. Answer y — or
+; the clock is invalid — and it prompts for DD/MM/YYYY HH:MM:SS. The RTC is
+; kept on NZST; the display adds +1 h during NZDT (last Sunday of September
+; .. first Sunday of April, weekday by Sakamoto).
+;
+; The panel is multiplexed, so the main loop just scans: one VQCSCN pass
+; (~20 ms), then a poll of the 1 Hz SQW line (PB2). On its falling edge the
+; time is re-read and re-rendered. The panel is dark during the console
+; prompts (nothing scans) — that is the safe idle state.
+;
+; Assemble:	m11asm -b 1000 clock.mac
+; Run:		1000G
+;
+; Wiring: panel J1 -> VIA port A (see vqc10.mac); DS3231 SDA=PB0 SCL=PB1,
+; SQW=PB2 (see ds3231.mac).
+
+.	= 001000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+RCSR	= 177560		; console receive status (bit 7 = char ready)
+RBUF	= 177562		; console receive buffer
+
+START:	MOV	#1000, SP
+	JSR	PC, VQCINI	; panel first: port set up, blank, enabled
+	JSR	PC, RTCINI
+	MOV	#DS3231, R0	; is the clock there?
+	JSR	PC, I2CPING
+	TST	R0
+	BEQ	FOUND
+	MOV	#MNONE, R1
+	JSR	PC, PMSG
+	MOV	#DNORTC, R0	; say it on the panel too
+	CLR	R1
+	JSR	PC, VQCSTR
+	MOV	#^D50, R2	; ~a moment of "NO RTC", then halt dark
+NORTC1:	JSR	PC, VQCSCN
+	SOB	R2, NORTC1
+	HALT
+
+FOUND:	JSR	PC, RTCAF	; status; bit 7 = OSF (lost power)
+	MOV	R0, R4		; keep it across the prompt (i2c saves R4)
+	MOV	#MSETQ, R1
+	JSR	PC, PMSG
+	JSR	PC, GETC	; y/n
+	MOV	R0, R5		; keep the key
+	JSR	PC, PUTC	; echo
+	JSR	PC, PCRLF
+	CMP	R5, #171	; 'y'
+	BEQ	DOSET
+	CMP	R5, #131	; 'Y'
+	BEQ	DOSET
+	BIT	#200, R4	; declined; was the clock stopped?
+	BEQ	RUN		; no -> keep the running time
+	MOV	#MLOST, R1	; yes -> must set it
+	JSR	PC, PMSG
+DOSET:	JSR	PC, SETUP
+RUN:	JSR	PC, RTCACL	; clear OSF
+	MOV	#MHEAD, R1
+	JSR	PC, PMSG
+	JSR	PC, SHOWTM	; first reading right away
+	CLRB	SQWPRV
+
+LOOP:	JSR	PC, VQCSCN	; keep the panel lit (~one frame)
+	JSR	PC, RTCSQ	; SQW level on PB2
+	BNE	LPHI
+	TSTB	SQWPRV		; low now - was it high?
+	BEQ	LOOP
+	CLRB	SQWPRV		; falling edge = one second
+	JSR	PC, SHOWTM
+	BR	LOOP
+LPHI:	MOVB	#1, SQWPRV
+	BR	LOOP
+
+; ---- read the RTC, NZ-adjust, render "HH:MM:SS" to the panel --------
+; Only sec/min/hour (3 bytes) are read each second, to keep the I2C pause
+; between scan passes short; the date part of TIMBUF is refreshed with a
+; full read whenever the hour changes (DST only moves on the hour).
+
+SHOWTM:	CLR	R0		; regs 0..2: sec, min, hour
+	MOV	#TIMBUF, R1
+	MOV	#3, R2
+	JSR	PC, RTCRD
+	MOVB	TIMBUF+2, R0
+	CMPB	R0, LSTHR	; same hour as the cached date?
+	BEQ	SHTM1
+	MOVB	R0, LSTHR
+	CLR	R0		; hour rolled: refresh the whole block
+	MOV	#TIMBUF, R1
+	MOV	#7, R2
+	JSR	PC, RTCRD
+SHTM1:	JSR	PC, CVTBIN	; BCD -> binary working set
+	JSR	PC, DSTADJ	; +1 h if NZDT
+	MOVB	BHOUR, R0
+	MOV	#DTIME, R1
+	JSR	PC, D2AT
+	MOVB	BMIN, R0
+	MOV	#DTIME+3, R1
+	JSR	PC, D2AT
+	MOVB	BSEC, R0
+	MOV	#DTIME+6, R1
+	JSR	PC, D2AT
+	MOV	#DTIME, R0
+	CLR	R1
+	JSR	PC, VQCSTR
+	RTS	PC
+
+; binary byte R0 (0..99) -> two ASCII digits at (R1)
+
+D2AT:	BIC	#177400, R0
+	MOV	R0, R3
+	CLR	R2
+	DIV	R2, #^D10	; R2 = tens, R3 = units
+	ADD	#60, R2
+	MOVB	R2, (R1)+
+	ADD	#60, R3
+	MOVB	R3, (R1)+
+	RTS	PC
+
+; ==== interactive date/time entry =================================
+; Reads "DD/MM/YYYY HH:MM:SS" (any non-digits are separators), builds the
+; 7-byte BCD SETBUF, computes the weekday, and sets the clock.
+
+SETUP:	MOV	#MENTER, R1
+	JSR	PC, PMSG
+	JSR	PC, GETDT	; R0 = digit count
+	CMP	R0, #^D14
+	BEQ	SU1
+	MOV	#MERR, R1
+	JSR	PC, PMSG
+	BR	SETUP
+SU1:	MOV	#NDBUF, R1
+	JSR	PC, MKB		; DD
+	MOVB	R0, SETBUF+4
+	JSR	PC, MKB		; MM
+	MOVB	R0, SETBUF+5
+	ADD	#2, R1		; skip the "20" of YYYY
+	JSR	PC, MKB		; YY
+	MOVB	R0, SETBUF+6
+	JSR	PC, MKB		; HH
+	MOVB	R0, SETBUF+2
+	JSR	PC, MKB		; MM
+	MOVB	R0, SETBUF+1
+	JSR	PC, MKB		; SS
+	MOVB	R0, SETBUF+0
+	JSR	PC, SETDOW	; SETBUF+3 = weekday 1..7
+	MOV	#SETBUF, R1
+	JSR	PC, RTCSET
+	RTS	PC
+
+; read a line, echo it, collect digit values into NDBUF; R0 = count
+
+GETDT:	MOV	#NDBUF, R3
+GDT1:	JSR	PC, GETC
+	CMP	R0, #15		; CR ends the line
+	BEQ	GDT9
+	CMP	R0, #12		; ignore LF
+	BEQ	GDT1
+	JSR	PC, PUTC	; echo separators and digits alike
+	CMP	R0, #60		; '0'
+	BLO	GDT1
+	CMP	R0, #71		; '9'
+	BHI	GDT1
+	CMP	R3, #NDBUF+^D14	; buffer full? (still echoed)
+	BHIS	GDT1
+	SUB	#60, R0		; store the digit value 0..9
+	MOVB	R0, (R3)+
+	BR	GDT1
+GDT9:	JSR	PC, PCRLF
+	MOV	R3, R0
+	SUB	#NDBUF, R0	; digit count
+	RTS	PC
+
+; two digit values at (R1) -> BCD byte in R0, R1 += 2
+
+MKB:	MOVB	(R1)+, R0
+	ASH	R0, #4		; tens nibble
+	MOVB	(R1)+, R2
+	BIS	R2, R0
+	BIC	#177400, R0
+	RTS	PC
+
+; weekday of SETBUF's date -> SETBUF+3 (1=Sun..7=Sat)
+
+SETDOW:	MOVB	SETBUF+6, R0	; year BCD
+	JSR	PC, BCD2B
+	MOVB	R0, BYEAR
+	MOVB	SETBUF+5, R0	; month BCD
+	BIC	#200, R0
+	JSR	PC, BCD2B
+	MOVB	R0, BMON
+	MOVB	SETBUF+4, R0	; date BCD
+	JSR	PC, BCD2B
+	MOVB	R0, BDAY
+	JSR	PC, YMDREG	; R0=year+2000, R1=month, R2=day
+	JSR	PC, DOW		; R0 = 0..6
+	INC	R0		; 1..7
+	MOVB	R0, SETBUF+3
+	RTS	PC
+
+; ==== NZ daylight-saving display adjust ===========================
+
+; TIMBUF (BCD) -> BSEC..BYEAR (binary), masking the hour/century flags
+
+CVTBIN:	MOVB	TIMBUF+0, R0
+	JSR	PC, BCD2B
+	MOVB	R0, BSEC
+	MOVB	TIMBUF+1, R0
+	JSR	PC, BCD2B
+	MOVB	R0, BMIN
+	MOVB	TIMBUF+2, R0
+	BIC	#300, R0	; drop 12/24 + AM/PM bits
+	JSR	PC, BCD2B
+	MOVB	R0, BHOUR
+	MOVB	TIMBUF+4, R0
+	JSR	PC, BCD2B
+	MOVB	R0, BDAY
+	MOVB	TIMBUF+5, R0
+	BIC	#200, R0	; drop century bit
+	JSR	PC, BCD2B
+	MOVB	R0, BMON
+	MOVB	TIMBUF+6, R0
+	JSR	PC, BCD2B
+	MOVB	R0, BYEAR
+	RTS	PC
+
+; if NZDT, add one hour to the binary set (rolling the date)
+
+DSTADJ:	JSR	PC, YMDREG	; R0=year+2000, R1=month, R2=day
+	JSR	PC, DSTON	; R0 = 1 if NZDT
+	TST	R0
+	BEQ	DADONE
+	MOVB	BHOUR, R0
+	BIC	#177400, R0
+	INC	R0
+	CMP	R0, #^D24
+	BLO	DAHR
+	CLR	R0		; 24:00 -> 00:00 next day
+	MOVB	R0, BHOUR
+	JSR	PC, INCDAY
+	RTS	PC
+DAHR:	MOVB	R0, BHOUR
+DADONE:	RTS	PC
+
+; R0 = full year (BYEAR+2000), R1 = month, R2 = day (all binary)
+
+YMDREG:	MOVB	BYEAR, R0
+	BIC	#177400, R0
+	ADD	#^D2000, R0
+	MOVB	BMON, R1
+	BIC	#177400, R1
+	MOVB	BDAY, R2
+	BIC	#177400, R2
+	RTS	PC
+
+; NZDT test: R0=year, R1=month, R2=day -> R0 = 1 (NZDT) or 0 (NZST)
+
+DSTON:	CMP	R1, #3
+	BLE	DSTYES		; Jan, Feb, Mar
+	CMP	R1, #^D10
+	BGE	DSTYES		; Oct, Nov, Dec
+	CMP	R1, #4
+	BEQ	DSTAPR
+	CMP	R1, #^D9
+	BEQ	DSTSEP
+	BR	DSTNO		; May..Aug
+DSTAPR:	MOV	R2, -(SP)	; NZDT while day < first Sunday of April
+	MOV	R0, -(SP)
+	MOV	#4, R1
+	MOV	#1, R2
+	JSR	PC, DOW		; weekday of Apr 1
+	MOV	#7, R1
+	SUB	R0, R1		; 7 - w
+	CMP	R1, #7
+	BNE	DSA1
+	CLR	R1
+DSA1:	INC	R1		; first Sunday
+	MOV	(SP)+, R0
+	MOV	(SP)+, R2
+	CMP	R2, R1
+	BLT	DSTYES
+	BR	DSTNO
+DSTSEP:	MOV	R2, -(SP)	; NZDT once day >= last Sunday of September
+	MOV	R0, -(SP)
+	MOV	#^D9, R1
+	MOV	#^D30, R2
+	JSR	PC, DOW		; weekday of Sep 30
+	MOV	#^D30, R1
+	SUB	R0, R1		; last Sunday = 30 - w
+	MOV	(SP)+, R0
+	MOV	(SP)+, R2
+	CMP	R2, R1
+	BGE	DSTYES
+	BR	DSTNO
+DSTYES:	MOV	#1, R0
+	RTS	PC
+DSTNO:	CLR	R0
+	RTS	PC
+
+; Sakamoto's weekday: R0=year, R1=month, R2=day -> R0 = 0(Sun)..6(Sat)
+; valid for 2001-2099 (uses /100=20, /400=5 folded into the -15 constant)
+
+DOW:	CMP	R1, #3
+	BGE	DOW1
+	DEC	R0		; Jan/Feb count in the previous year
+DOW1:	DEC	R1
+	MOVB	DOWTAB(R1), R3
+	BIC	#177400, R3
+	ADD	R2, R3		; + day
+	ADD	R0, R3		; + year
+	ASH	R0, #-2		; year / 4
+	ADD	R0, R3
+	SUB	#^D15, R3	; - (100-term) + (400-term)
+	CLR	R2
+	DIV	R2, #^D7	; R3 = weekday
+	MOV	R3, R0
+	RTS	PC
+
+; day++ in the binary set, rolling month and year
+
+INCDAY:	MOVB	BDAY, R0
+	BIC	#177400, R0
+	INC	R0
+	JSR	PC, DIMON	; R1 = days in this month
+	CMP	R0, R1
+	BLE	IDDAY
+	MOV	#1, R0
+	MOVB	R0, BDAY
+	MOVB	BMON, R0
+	BIC	#177400, R0
+	INC	R0
+	CMP	R0, #^D12
+	BLE	IDMON
+	MOV	#1, R0
+	MOVB	R0, BMON
+	MOVB	BYEAR, R1
+	BIC	#177400, R1
+	INC	R1
+	MOVB	R1, BYEAR
+	RTS	PC
+IDMON:	MOVB	R0, BMON
+	RTS	PC
+IDDAY:	MOVB	R0, BDAY
+	RTS	PC
+
+; R1 = days in month BMON (29 for February of a leap year)
+
+DIMON:	MOVB	BMON, R0
+	BIC	#177400, R0
+	DEC	R0
+	MOVB	DIMTAB(R0), R1
+	BIC	#177400, R1
+	CMP	R0, #1		; February?
+	BNE	DIMD
+	MOVB	BYEAR, R2
+	BIC	#177400, R2
+	BIC	#177774, R2	; BYEAR mod 4
+	BNE	DIMD
+	MOV	#^D29, R1
+DIMD:	RTS	PC
+
+; BCD byte in R0 -> binary in R0 (clobbers R1, R2)
+
+BCD2B:	BIC	#177400, R0
+	MOV	R0, R2
+	ASH	R0, #-4		; tens nibble
+	BIC	#177760, R0
+	MOV	R0, R1
+	ASH	R0, #3		; tens * 8
+	ASH	R1, #1		; tens * 2
+	ADD	R1, R0		; tens * 10
+	MOV	R2, R1
+	BIC	#177760, R1	; units nibble
+	ADD	R1, R0
+	RTS	PC
+
+; ==== console I/O =================================================
+
+PCRLF:	MOV	#15, R0
+	JSR	PC, PUTC
+	MOV	#12, R0
+	JSR	PC, PUTC
+	RTS	PC
+
+PMSG:	MOVB	(R1)+, R0	; print ASCIZ at R1
+	BEQ	PMS2
+	JSR	PC, PUTC
+	BR	PMSG
+PMS2:	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+GETC:	TSTB	@#RCSR		; wait for a character
+	BPL	GETC
+	MOVB	@#RBUF, R0
+	BIC	#177600, R0	; 7-bit
+	RTS	PC
+
+; ==== data ========================================================
+
+	.EVEN
+SETBUF:	.BLKB	^D7		; filled by the interactive setup
+TIMBUF:	.BLKB	^D7		; RTC read-back (BCD)
+NDBUF:	.BLKB	^D14		; entered digits
+
+BSEC:	.BYTE	0		; binary working set for display
+BMIN:	.BYTE	0
+BHOUR:	.BYTE	0
+BDAY:	.BYTE	0
+BMON:	.BYTE	0
+BYEAR:	.BYTE	0
+SQWPRV:	.BYTE	0		; previous SQW level, for edge detection
+LSTHR:	.BYTE	377		; hour of the cached date block (377 = none)
+	.EVEN
+
+DOWTAB:	.BYTE	0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4
+DIMTAB:	.BYTE	^D31, ^D28, ^D31, ^D30, ^D31, ^D30, ^D31, ^D31, ^D30, ^D31, ^D30, ^D31
+	.EVEN
+
+DTIME:	.ASCII	/00:00:00/	; rendered time, sent to the panel
+	.BYTE	0
+DNORTC:	.ASCIZ	/NO RTC  /
+
+MSETQ:	.ASCII	|Set date/time? (y/n): |
+	.BYTE	0
+MENTER:	.ASCII	|Enter DD/MM/YYYY HH:MM:SS: |
+	.BYTE	0
+MERR:	.ASCII	/Need 14 digits - try again/
+	.BYTE	15, 12, 0
+MLOST:	.ASCII	/Clock was not running/
+	.BYTE	15, 12, 0
+MHEAD:	.ASCII	/DS3231 -> VQC10 panel clock - NZ time/
+	.BYTE	15, 12, 0
+MNONE:	.ASCII	/No DS3231 at 0x68/
+	.BYTE	15, 12, 0
+	.EVEN
+
+	.INCLUDE "../i2c/i2c.mac"
+	.INCLUDE "../ds3231/ds3231.mac"
+	.INCLUDE /vqc10.mac/
+	.INCLUDE "../max7219/font5x7.mac"
+
+	.END	START

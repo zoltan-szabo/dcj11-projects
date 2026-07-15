@@ -1,0 +1,250 @@
+; vqc10.mac — pure driver for the "DisplayVQC10" panel (two VQC10 modules)
+;
+; Drives the retromodding DisplayVQC10 panel board directly: three chained
+; 74HC595s feeding two VQC10 4-digit 5x7 LED matrix modules (WF Berlin).
+; "Pure" = no ATmega on the panel's controller port — the J-11 bit-bangs the
+; shift chain itself. 8 digits total.
+;
+; Wiring (W65C22S VIA on the Multi IO card, port A -> panel J1):
+;	DATA  - PA0	(J1.5 MOSI, into the first 595)
+;	CLK   - PA1	(J1.4 SCLK, all three 595s)
+;	LATCH - PA2	(J1.3 RCLK, all three 595s)
+;	OFF   - PA3	(J1.2 LEDOFF = 595 /OE; 10k pull-up, so the panel is
+;			 blank until the driver drives it low)
+;	plus +5V (J1.1) and GND (J1.6)
+;
+; Panel chain (24 bits, first bit shifted ends up farthest = U4):
+;	U4 QA-QG = Y1-Y7  row select, high-side P-FETs to the Z row lines.
+;	                  ACTIVE LOW: Y drives the P-FET gate (47k pull-up),
+;	                  so Y=0 turns the row ON, Y=1 off. Idle byte = 377.
+;	U3 QA-QH = C1-C8  cp clock per digit (C1-C4 module 1, C5-C8 module 2)
+;	U2 QA-QE = D1-D5  column data into every digit in parallel
+;
+; The VQC10 latches 5 column bits per digit on its cp edge; the panel is row-
+; multiplexed: per row, clock all 8 digits' column patterns in (one cp pulse
+; each), then switch that row's FET on and dwell. The datasheet's luminance
+; spec assumes a 1:10 duty, which this scan roughly delivers.
+;
+; API (routines clobber R0-R3 unless noted; R4/R5 are preserved):
+;	VQCINI	init port, clear the panel, display on
+;	VQCPUT	R0 = ASCII char, R1 = digit 0..7 -> render into the buffer
+;	VQCSTR	R0 -> ASCIZ string, R1 = start digit (clips at 8)
+;	VQCCLR	blank the buffer
+;	VQCSCN	one full scan pass (~all 7 rows). Call continuously; the
+;		panel is dark whenever nothing scans (safe to stop).
+;	VQCON	display on  (OFF low)
+;	VQCOFF	display off (OFF high; scanning may continue harmlessly)
+;
+; The character shapes come from the shared 5x7 font (label FONT) — the
+; program must also  .INCLUDE "../max7219/font5x7.mac".
+;
+; ORIENTATION (verified on hardware 2026-07-15): cp is ACTIVE LOW with data
+; latched on the rising (release) edge, C1 = leftmost digit, Z1 = top row.
+; For a different module/panel the switches are:
+;   - cp polarity: set CPIDLE = 0 and swap the BICBs for BISBs in VQCSCN.
+;   - digit order: walk CPBIT the other way in VQCSCN (MOVB #200,CPBIT,
+;     then CLC + RORB CPBIT in place of the ASLB).
+;   - row order: change VQCPUT to write rows bottom-up (see comment there).
+;
+; Runs on the DCJ-11 SBC + Multi IO card by Peter Schranz:
+;	https://www.5volts.ch/pages/dcj11sbc/
+; Panel: "DisplayVQC10" by Konstantin Repnikov (vk.com/retromodding).
+; VQC10 datasheet: Funkamateur-Bauelementeinformation FA 6/90.
+
+VIAORA	= 174002		; VIA ORA/IRA - port A data
+VIADRA	= 174006		; VIA DDRA - direction, 1 bit = output
+
+VQDATA	= 1			; PA0
+VQCLK	= 2			; PA1
+VQLTCH	= 4			; PA2
+VQOFF	= 10			; PA3
+
+NDIG	= ^D8			; 2 modules x 4 digits
+CPIDLE	= 377			; cp lines idle HIGH (active-low clock pulse)
+DWELL	= ^D1400		; row-on delay loop count (brightness/flicker):
+				; bigger = brighter but slower refresh
+
+; ---- init: port, defined 595 state, clear, display on ---------------
+
+VQCINI:	MOV	#17, @#VIADRA	; PA0-3 outputs
+	MOV	#VQOFF, OFFSTA	; blanked while we set up
+	MOV	#VQOFF, @#VIAORA
+	JSR	PC, VQCCLR
+	MOVB	#377, SNDROW	; defined latch state: rows off (gates high)
+	MOVB	#CPIDLE, SNDCP
+	CLRB	SNDDAT
+	JSR	PC, VQSEND
+	CLR	OFFSTA		; display on
+	MOV	#0, @#VIAORA
+	RTS	PC
+
+; ---- blank the row buffer -------------------------------------------
+
+VQCCLR:	MOV	#ROWBUF, R0
+	MOV	#NDIG*7, R1
+VQCL1:	CLRB	(R0)+
+	SOB	R1, VQCL1
+	RTS	PC
+
+; ---- display on / off (595 /OE via the OFF line) --------------------
+
+VQCON:	CLR	OFFSTA
+	MOV	OFFSTA, @#VIAORA
+	RTS	PC
+
+VQCOFF:	MOV	#VQOFF, OFFSTA
+	MOV	OFFSTA, @#VIAORA
+	RTS	PC
+
+; ---- render one character, R0 = ASCII, R1 = digit 0..7 --------------
+; Transposes the column-major glyph into ROWBUF's row-major bytes.
+; Out-of-range characters render as a space. R1 is preserved.
+
+VQCPUT:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	MOV	R4, -(SP)
+	MOV	R5, -(SP)
+	CMP	R1, #NDIG	; digit on the panel?
+	BGE	VQCPX
+	SUB	#40, R0		; glyph index
+	BLT	VQCPS
+	CMP	R0, #^D95
+	BLE	VQCP0
+VQCPS:	CLR	R0		; not printable -> space
+VQCP0:	MOV	R0, R2		; glyph = FONT + index*5
+	ASL	R0
+	ASL	R0
+	ADD	R2, R0
+	ADD	#FONT, R0
+	MOV	#ROWBUF, R3	; clear this digit's 7 row slots
+	ADD	R1, R3
+	MOV	#7, R2
+VQCP1:	CLRB	(R3)
+	ADD	#NDIG, R3
+	SOB	R2, VQCP1
+	MOV	#1, R4		; column bit: glyph column 0 -> D1
+VQCP2:	MOVB	(R0)+, R5	; one column byte, bit 0 = top row
+	MOV	#ROWBUF, R3	; row walker for this digit
+	ADD	R1, R3		; (upside down? walk from ROWBUF+6*NDIG+R1
+	MOV	#7, R2		;  downward with SUB #NDIG,R3 instead)
+VQCP3:	RORB	R5		; row bit -> carry, top row first
+	BCC	VQCP4
+	BISB	R4, (R3)	; set this column in that row
+VQCP4:	ADD	#NDIG, R3
+	SOB	R2, VQCP3
+	ASLB	R4		; next column bit
+	CMPB	R4, #40		; 5 columns done?
+	BLT	VQCP2
+VQCPX:	MOV	(SP)+, R5
+	MOV	(SP)+, R4
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- render ASCIZ string, R0 -> text, R1 = start digit --------------
+
+VQCSTR:	MOV	R4, -(SP)
+	MOV	R0, R4
+VQST1:	CMP	R1, #NDIG
+	BGE	VQST9
+	MOVB	(R4)+, R0
+	BEQ	VQST9
+	JSR	PC, VQCPUT
+	INC	R1
+	BR	VQST1
+VQST9:	MOV	(SP)+, R4
+	RTS	PC
+
+; ---- one full scan pass over the 7 rows -----------------------------
+; STRICT cp timing: because all 595 outputs update together at one RCLK,
+; a word that raises any cp must not change D1-D5, and a word that changes
+; D1-D5 must not raise a cp — otherwise the latching edge races the data
+; (that shows up as ghost pixels from the neighbouring digit). So each
+; digit costs two words, with the last release merged into the row-on:
+;
+;   w1        D = data 0, assert cp0        (falling edge, harmless)
+;   then 7x:  release cp d + assert cp d+1  (D held = data d -> latches)
+;             D = data d+1                  (its cp low, no edge)
+;   w16       release cp7 + row's FET on    (D held = data 7)
+;   dwell. Ends with all rows off, so stopping the scan is safe.
+
+VQCSCN:	MOV	R5, -(SP)
+	MOV	#ROWBUF, R5	; walking source, row-major
+	CLR	ROWN
+VQSC1:	MOVB	#377, SNDROW	; rows off while loading (gates high)
+	MOVB	#1, CPBIT	; w1: digit 0's data, its cp asserted
+	MOVB	(R5)+, SNDDAT
+	MOVB	#CPIDLE, R0	; (active-high panels: BISB with CPIDLE=0,
+	BICB	CPBIT, R0	;  here and below)
+	MOVB	R0, SNDCP
+	JSR	PC, VQSEND
+	MOV	#7, DIGN
+VQSC2:	ASLB	CPBIT		; release this digit, assert the next
+	MOVB	#CPIDLE, R0	; (D unchanged across the latching edge)
+	BICB	CPBIT, R0
+	MOVB	R0, SNDCP
+	JSR	PC, VQSEND
+	MOVB	(R5)+, SNDDAT	; next digit's data (its cp low, no edge)
+	JSR	PC, VQSEND
+	DEC	DIGN
+	BGT	VQSC2
+	MOVB	#CPIDLE, SNDCP	; w16: release cp7 and light this row
+	MOV	ROWN, R2
+	MOVB	ROWTAB(R2), SNDROW
+	COMB	SNDROW
+	JSR	PC, VQSEND
+	MOV	#DWELL, R0
+VQSC3:	SOB	R0, VQSC3
+	INC	ROWN
+	CMP	ROWN, #7
+	BLT	VQSC1
+	MOVB	#377, SNDROW	; leave the panel dark between passes
+	JSR	PC, VQSEND
+	MOV	(SP)+, R5
+	RTS	PC
+
+; ---- shift SNDROW,SNDCP,SNDDAT to the chain and latch ----------------
+; 24 bits, MSB of each byte first; the first byte ends up in U4 (rows).
+; Every port write ORs in OFFSTA so the OFF line holds its state.
+
+VQSEND:	MOV	R4, -(SP)
+	MOV	R5, -(SP)
+	MOV	#VIAORA, R5	; port and idle state in registers: the
+	MOV	OFFSTA, R2	; bit loop runs without operand fetches
+	MOV	#SNDROW, R1
+	MOV	#3, -(SP)	; 3 bytes
+VQSN1:	MOVB	(R1)+, R0
+	SWAB	R0		; byte into bits 15..8
+	MOV	#10, R3
+VQSN2:	ASL	R0		; next bit -> carry
+	MOV	R2, R4		; base: CLK/LATCH/DATA low (keeps carry)
+	ADC	R4		; carry -> bit 0 = the DATA line
+	MOV	R4, (R5)	; data valid, CLK low
+	BIS	#VQCLK, R4
+	MOV	R4, (R5)	; CLK rising edge shifts
+	SOB	R3, VQSN2
+	DEC	(SP)
+	BGT	VQSN1
+	TST	(SP)+
+	MOV	R2, R4
+	BIS	#VQLTCH, R4
+	MOV	R4, (R5)	; LATCH rising edge: outputs update
+	MOV	R2, (R5)	; back to idle
+	MOV	(SP)+, R5
+	MOV	(SP)+, R4
+	RTS	PC
+
+; ---- state -----------------------------------------------------------
+
+	.EVEN
+OFFSTA:	.WORD	VQOFF		; OFF line shadow, ORed into every write
+ROWN:	.WORD	0		; scan row 0..6
+DIGN:	.WORD	0		; scan digit countdown
+CPBIT:	.BYTE	0		; scan cp bit walker
+SNDROW:	.BYTE	377		; 24-bit send image: rows (U4), bit 0 = Y1, ACTIVE LOW
+SNDCP:	.BYTE	0		;   cp lines (U3), bit 0 = C1
+SNDDAT:	.BYTE	0		;   column data (U2), bit 0 = D1
+ROWTAB:	.BYTE	1, 2, 4, 10, 20, 40, 100
+	.EVEN
+ROWBUF:	.BLKB	NDIG*7		; row-major image: [row*8 + digit], 5 bits
+	.EVEN

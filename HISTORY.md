@@ -3,6 +3,41 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## VQC10 panel project (2026-07-15)
+
+`vqc10/vqc10.mac` drives the "DisplayVQC10" panel (Konstantin Repnikov,
+vk.com/retromodding) directly — two VQC10 4-digit 5x7 LED matrix modules
+(WF Berlin) behind three chained 74HC595s. "Pure" = no ATmega controller;
+the J-11 bit-bangs the chain on VIA port A (DATA=PA0, CLK=PA1, LATCH=PA2,
+OFF=PA3 -> the 595s' /OE, which is pulled up so the panel is blank until
+driven). API: VQCINI, VQCPUT/VQCSTR (glyphs transposed from the shared
+column-major font into a row-major buffer), VQCSCN (one scan pass, call
+continuously; ends dark so pausing is safe), VQCON/VQCOFF. `vqc10/clock.mac`
+shows DS3231 time as HH:MM:SS on the 8 digits — same set-prompt/OSF/NZ-DST
+behaviour as the ds3231 demos, ticked off the SQW edge, reading only 3 RTC
+bytes per second (full block on hour change) to keep the between-frames
+I2C pause invisible.
+
+The shared 5x7 font moved out of max7219.mac into `max7219/font5x7.mac`
+(both drivers .INCLUDE it); hello.oct proved byte-identical after the
+refactor, so no re-test was needed.
+
+Hardware bring-up found two real lessons, both now in the driver and its
+README: the panel's row select is ACTIVE LOW (595 -> P-FET gate, so an
+inverted row byte lights the whole panel with glyph columns smeared over
+every row), and cp timing is strict — all 595 outputs move on one RCLK, so
+the word that raises a cp must not change the data lines, or chip skew
+races the module's latch and sprays ghost pixels from the neighbouring
+digit (seen as stray pixels on digits 5/7 before the fix). VQCSCN therefore
+costs two latch words per digit; the refresh (~60 Hz) was won back by
+tightening VQSEND instead: port address and idle state held in registers
+and the DATA bit set straight from the carry (ADC — DATA is PA0).
+Datasheet assumptions verified: cp active-low latching on release,
+C1 = leftmost digit, Z1 = top row. Hardware-tested: the clock runs.
+
+Next: a second driver talking to the panel's own ATmega328 controller
+board instead of driving the latches directly.
+
 ## AT24C32 EEPROM project (2026-07-12)
 
 `at24c32/at24c32.mac` drives the AT24C32 (32 Kbit / 4 KB) I2C EEPROM on the
