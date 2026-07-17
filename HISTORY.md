@@ -3,6 +3,52 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## eeboot: boot-from-EEPROM experiment, shelved (2026-07-16..17)
+
+The goal: power the machine on and have it run a program with no PC
+attached — a ~250-word loader in the Multi IO card's boot ROM window
+(173000) reads an image from the DS3231 board's AT24C32 over I2C, copies
+it to RAM, verifies, jumps. The vqc10 clock (1404 words) was to be the
+first payload. The loader, burner (`eeburn`), image format and test
+payload all work; the mission failed anyway, for reasons worth recording.
+
+What was built: a two-stage loader (stage 0 relocates stage 1 to RAM with
+per-word verified writes; stage 1 masks interrupts, owns every vector,
+disables the MMU, double-checksums the payload — I2C stream and RAM, the
+RAM sum three consecutive times — settles, jumps; any later trap re-enters
+the loader, so crashes self-heal), `eeburn.mac` (interactive AT24C32
+burner with verify), `romburn.mac` (paced in-circuit AT28C64 burner with
+data polling), `hitest.mac` (minimal payload), `mkrom.py` (ROM images for
+external programmers and window .oct files for in-circuit parts).
+
+What the campaign found, layer by layer: a verified AT28C64 burn lost to
+a power cycle (unprotected EEPROMs catch stray writes as the rails move;
+SDP would prevent it but exists only on the B parts — on plain AT28C64
+the unlock writes are real writes and ruined the re-burn). W27C512
+replacements needed their floating A13/A15 tied. ODT's `G` starts code at
+priority 0, and one spurious interrupt through cold-garbage vectors makes
+a trap storm: SP marches through RAM leaving PS/PC frames everywhere, the
+console sprays kilobytes of garbage, and the wreck halts at a bias-stable
+PC (045417 became an old friend). An FM1608 FRAM fits the socket
+perfectly and burns by plain upload — and was shredded by the first wild
+program, because a boot ROM that writes at bus speed is erased at bus
+speed. And the one that cost days: **console ODT examine/deposit use the
+address exactly as typed — `173000/` is physical 00173000, i.e. RAM;
+only `G` completes 16-bit addresses into the I/O page** — so several
+"burns" and "verifications" of the ROM windows had been reading and
+writing RAM at 62K. Read the manual first.
+
+Underneath it all: sporadically corrupted full-speed bus operations —
+occasional lost stores and lying reads, seen even in a bare serial upload
+(one word of a 1404-word image arrived wrong) — whenever the boot ROM
+window was in play. Diagnosis: the Multi IO card's boot ROM handling does
+not reliably coexist with the W65C22S-paced bus; the DCJ-11 and RAM are
+sound (the 16 MHz clock is a VIA concession — the CPU is good for 18).
+Conclusion: on this card revision, the W65C22S (with the software-I2C
+EEPROM behind it) and the boot EPROM cannot be used together. Shelved;
+`eeburn` and the image format remain useful, and the loader is ready
+should the ROM path ever become trustworthy.
+
 ## VQC10 panel project (2026-07-15)
 
 `vqc10/vqc10.mac` drives the "DisplayVQC10" panel (Konstantin Repnikov,

@@ -1,0 +1,208 @@
+; eeboot.mac — boot loader, stage 1: runs from RAM at 70000 (see eeboot0.mac)
+;
+; Stage 0 in the boot ROM relocates this code to 70000 and jumps here; from
+; that point nothing executes from the ROM window (the cold machine loses
+; RAM stores while fetching from the I/O page — found the hard way). This
+; stage reads the program image from the AT24C32 on the ZS-042 DS3231 module,
+; copies it to RAM, and verifies the checksum over the I2C stream, then over
+; what actually landed in RAM - the RAM sum THREE consecutive times, because
+; on a cold marginal bus a single read can lie. Any failure retries the whole
+; load (up to 60 times, one "r" and a ~0.5 s pause per retry - a cold system
+; warms itself into margin) before giving up with BAD and a HALT to ODT.
+;
+; Image layout in the AT24C32 (written by eeburn.mac), words little-endian:
+;	+0	word count of the payload (1..2044)
+;	+2	load address (even, >= 1000)
+;	+4	start address
+;	+6..	payload words
+;	last	checksum: the sum of every word above including itself is 0
+;
+; The loader sits at 70000-71577; payloads (max 2044 words from 1000) end
+; well below. Stack at 1000 grows down, reset on every retry.
+;
+; Assemble:	m11asm -b 70000 eeboot.mac
+; Burn:		mkrom.py packs eeboot0.oct + eeboot.oct into the ROM images.
+;
+; Runs on the DCJ-11 SBC + Multi IO card by Peter Schranz:
+;	https://www.5volts.ch/pages/dcj11sbc/
+
+.	= 070000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+
+EEWA	= 256			; 0xAE: AT24C32 at 0x57, write
+EERA	= 257			; 0xAF: read
+MAXWDS	= ^D2044		; payload limit: (4096 - 8) / 2
+NRETRY	= ^D60
+
+; register use across a load (I2CWR/I2CRD preserve R2-R5):
+;	R3 = word countdown	R4 = load pointer	R5 = running sum
+
+BOOT:	MOV	#340, @#177776	; priority 7, belt and braces
+	MOV	#1000, SP
+	MOV	#0, R0		; own every vector: anything that traps
+VECFIL:	MOV	#CATCH, (R0)+	; lands in CATCH instead of cold garbage
+	MOV	#340, (R0)+	; (a trap through uninitialized vectors
+	CMP	R0, #1000	; cascades into a stack storm that stomps
+	BLO	VECFIL		; RAM - seen live, not theory)
+	MOV	#NRETRY, RETRY
+	MOV	#MBOOT, R1
+	JSR	PC, PMSG
+RELOAD:	MOV	#1000, SP	; fresh stack every attempt
+	JSR	PC, I2CINI
+	JSR	PC, RDOPEN	; sequential read from EEPROM address 0
+	CLR	R5
+	JSR	PC, RDWORD	; word count
+	ADD	R0, R5
+	MOV	R0, HCNT
+	MOV	R0, R3
+	BEQ	RFAIL		; empty
+	CMP	R3, #MAXWDS
+	BHI	RFAIL		; silly count
+	JSR	PC, RDWORD	; load address
+	ADD	R0, R5
+	MOV	R0, HLOAD
+	MOV	R0, R4
+	BIT	#1, R4
+	BNE	RFAIL		; odd
+	CMP	R4, #1000
+	BLO	RFAIL		; would land on vectors/stack
+	JSR	PC, RDWORD	; start address
+	ADD	R0, R5
+	MOV	R0, HSTART
+COPY:	JSR	PC, RDWORD	; the payload
+	ADD	R0, R5
+	MOV	R0, (R4)+
+	SOB	R3, COPY
+	CLR	R1		; checksum word: ACK the low byte,
+	JSR	PC, I2CRD
+	MOV	R0, HCKSW
+	MOV	#1, R1		; NACK the high byte (last of the transfer)
+	JSR	PC, I2CRD
+	SWAB	R0
+	BIS	R0, HCKSW
+	ADD	HCKSW, R5
+	JSR	PC, I2CSTO
+	TST	R5		; the stream sums to zero...
+	BNE	RFAIL
+	MOV	#3, VPASS	; ...and so must what LANDED IN RAM -
+VAGAIN:	JSR	PC, VSUM	; THREE consecutive times: on a cold
+	BNE	RFAIL		; marginal bus a single read can lie,
+	DEC	VPASS		; but not three sums in a row
+	BGT	VAGAIN
+	MOV	#5, VPASS	; then SETTLE: the payload only starts
+SETTLE:	MOV	#^D120, R1	; after the image stays clean through
+STDLY:	CLR	R0		; five re-checks ~2 s apart - a cold
+STDL1:	SOB	R0, STDL1	; machine buys itself warm-up time
+	SOB	R1, STDLY
+	JSR	PC, VSUM
+	BNE	RFAIL
+	MOV	#56, R0		; progress "."
+	JSR	PC, PUTC
+	DEC	VPASS
+	BGT	SETTLE
+	MOV	#MOK, R1
+	JSR	PC, PMSG
+	MOV	HSTART, R2
+	JMP	(R2)		; run it
+
+; sum the header + the payload AS IT SITS IN RAM; Z set = clean
+
+VSUM:	MOV	HCNT, R1
+	ADD	HLOAD, R1
+	ADD	HSTART, R1
+	ADD	HCKSW, R1
+	MOV	HCNT, R3
+	MOV	HLOAD, R4
+VSUM1:	ADD	(R4)+, R1
+	SOB	R3, VSUM1
+	TST	R1
+	RTS	PC
+
+RFAIL:	DEC	RETRY		; something was off - go again
+	BLE	FAIL
+	MOV	#162, R0	; one "r" per retry
+	JSR	PC, PUTC
+	MOV	#^D30, R1	; ~half a second of settling between
+RFDLY:	CLR	R0		; tries; a cold marginal system gets
+RFDL1:	SOB	R0, RFDL1	; warmer with every lap
+	SOB	R1, RFDLY
+	JMP	RELOAD
+FAIL:	MOV	#MBAD, R1
+	JSR	PC, PMSG
+	HALT			; back to ODT
+
+; any trap - during the load OR later, from a payload that crashed on the
+; still-cold bus - lands here and RESTARTS the whole boot: the vectors stay
+; pointed at us after the payload launches, so the system self-heals until
+; it is warm enough to stay up ("!" marks each restart)
+
+CATCH:	MOV	#340, @#177776	; re-arm from whatever state the wreck left
+	MOV	#1000, SP
+	MOV	#41, R0		; "!"
+	JSR	PC, PUTC
+	JMP	BOOT
+
+; ---- open a sequential read at EEPROM address 0 ---------------------
+; Retries from here if the EEPROM does not ACK (absent board).
+
+RDOPEN:	JSR	PC, I2CSTA
+	MOV	#EEWA, R0
+	JSR	PC, I2CWR
+	TST	R0
+	BNE	RFAIL		; no AT24C32 (RELOAD resets the stack)
+	CLR	R0		; address high byte
+	JSR	PC, I2CWR
+	CLR	R0		; address low byte
+	JSR	PC, I2CWR
+	JSR	PC, I2CSTA	; repeated start
+	MOV	#EERA, R0
+	JSR	PC, I2CWR
+	RTS	PC
+
+; ---- read one little-endian word, ACKing both bytes -> R0 -----------
+
+RDWORD:	CLR	R1
+	JSR	PC, I2CRD
+	MOV	R0, -(SP)	; low byte
+	CLR	R1
+	JSR	PC, I2CRD
+	SWAB	R0		; high byte into place
+	BIS	(SP)+, R0
+	RTS	PC
+
+; ---- console ---------------------------------------------------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMS2
+	JSR	PC, PUTC
+	BR	PMSG
+PMS2:	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+; ---- state (this code lives in RAM, so variables live right here) ----
+
+	.EVEN
+RETRY:	.WORD	0		; attempts left
+VPASS:	.WORD	0		; consecutive clean verifies still needed
+HCNT:	.WORD	0		; header: payload words
+HLOAD:	.WORD	0		;         load address
+HSTART:	.WORD	0		;         start address
+HCKSW:	.WORD	0		; the image's checksum word
+
+MBOOT:	.ASCII	/EEBOOT /
+	.BYTE	0
+MOK:	.ASCII	/OK/
+	.BYTE	15, 12, 0
+MBAD:	.ASCII	/ BAD/
+	.BYTE	15, 12, 0
+	.EVEN
+
+	.INCLUDE "../i2c/i2c.mac"
+
+	.END	BOOT

@@ -1,0 +1,31 @@
+; hitest.mac — minimal eeboot test payload: prints a banner and HALTs
+;
+; Burn with eeburn (Load: 1000, Words: see m11asm output, Start: 1000) to
+; check the ROM-loader handoff in isolation: after EEBOOT OK it must print
+; HI FROM EEPROM and halt at a known, even address (the word after HLT).
+; If this works from a cold power-up while the clock payload does not, the
+; problem is in the clock; if this also dies cold, it is in the handoff.
+;
+; Assemble:	m11asm -b 1000 hitest.mac
+
+.	= 001000
+
+XCSR	= 177564
+XBUF	= 177566
+
+START:	MOV	#1000, SP
+	MOV	#MSG, R1
+LOOP:	MOVB	(R1)+, R0
+	BEQ	DONE
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	BR	LOOP
+DONE:	HALT
+	BR	DONE		; in case someone types P
+
+MSG:	.ASCII	/HI FROM EEPROM/
+	.BYTE	15, 12, 0
+	.EVEN
+
+	.END	START

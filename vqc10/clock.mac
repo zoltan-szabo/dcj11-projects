@@ -6,9 +6,11 @@
 ;
 ; Start-up matches the ds3231 demos: reads the OSF flag (set when the clock
 ; lost power) and asks "Set date/time? (y/n)" on the console. Answer y — or
-; the clock is invalid — and it prompts for DD/MM/YYYY HH:MM:SS. The RTC is
-; kept on NZST; the display adds +1 h during NZDT (last Sunday of September
-; .. first Sunday of April, weekday by Sakamoto).
+; the clock is invalid — and it prompts for DD/MM/YYYY HH:MM:SS. The prompt
+; defaults to "n" after ~5 s of silence, so the clock starts unattended when
+; booted from ROM (eeboot) with no terminal; a stopped clock (OSF) still
+; insists on being set. The RTC is kept on NZST; the display adds +1 h during
+; NZDT (last Sunday of September .. first Sunday of April, Sakamoto weekday).
 ;
 ; The panel is multiplexed, so the main loop just scans: one VQCSCN pass
 ; (~20 ms), then a poll of the 1 Hz SQW line (PB2). On its falling edge the
@@ -49,9 +51,12 @@ FOUND:	JSR	PC, RTCAF	; status; bit 7 = OSF (lost power)
 	MOV	R0, R4		; keep it across the prompt (i2c saves R4)
 	MOV	#MSETQ, R1
 	JSR	PC, PMSG
-	JSR	PC, GETC	; y/n
-	MOV	R0, R5		; keep the key
-	JSR	PC, PUTC	; echo
+	JSR	PC, GETCT	; y/n, ~5 s timeout (for PC-less booting)
+	TST	R0
+	BPL	FND1		; got a key
+	MOV	#116, R0	; nobody there: default to 'N'
+FND1:	MOV	R0, R5		; keep the key
+	JSR	PC, PUTC	; echo (the default too)
 	JSR	PC, PCRLF
 	CMP	R5, #171	; 'y'
 	BEQ	DOSET
@@ -404,6 +409,21 @@ GETC:	TSTB	@#RCSR		; wait for a character
 	BPL	GETC
 	MOVB	@#RBUF, R0
 	BIC	#177600, R0	; 7-bit
+	RTS	PC
+
+; GETC with a ~5 s timeout -> R0 = char, or -1 if nothing arrived.
+; Lets the clock start unattended when booted from ROM (eeboot).
+
+GETCT:	MOV	#^D5000, R2	; ~5000 x ~1 ms
+GCT1:	MOV	#^D300, R3
+GCT2:	TSTB	@#RCSR
+	BMI	GCT9		; a character is ready
+	SOB	R3, GCT2
+	SOB	R2, GCT1
+	MOV	#-1, R0		; timed out
+	RTS	PC
+GCT9:	MOVB	@#RBUF, R0
+	BIC	#177600, R0
 	RTS	PC
 
 ; ==== data ========================================================

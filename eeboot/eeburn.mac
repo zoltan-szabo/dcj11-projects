@@ -1,0 +1,242 @@
+; eeburn.mac — store a program image in the DS3231 board's AT24C32 EEPROM
+;
+; The companion to eeboot.mac: writes the boot image ([count][load][start]
+; [payload...][checksum], all words little-endian) into the AT24C32 at I2C
+; address 0x57, then re-reads the whole image and checks that it sums to
+; zero, like the boot ROM will.
+;
+; Workflow (J11Terminal):
+;	1. upload the program to its natural address (e.g. clock.oct at 1000)
+;	2. upload eeburn.oct (assembled at 40000, clear of the payload), 40000G
+;	3. answer three prompts, octal by default, a trailing "." = decimal:
+;	     Load:  1000        (where the program sits = where it will load)
+;	     Words: 1383.       (m11asm prints the word count in decimal)
+;	     Start: 1000
+;	4. "OK" = written and verified; eeboot will now start it at power-up
+;
+; Sizes: payload up to 2044 words (3774 octal). Writing runs at the EEPROM's
+; ~5 ms/byte ACK-polled pace — a full 4 KB takes a dozen seconds or so.
+;
+; Runs on the DCJ-11 SBC + Multi IO card by Peter Schranz:
+;	https://www.5volts.ch/pages/dcj11sbc/
+
+.	= 040000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+RCSR	= 177560		; console receive status (bit 7 = char ready)
+RBUF	= 177562		; console receive buffer
+
+MAXWDS	= ^D2044
+
+START:	MOV	#40000, SP	; stack below the code, clear of payloads
+	JSR	PC, I2CINI
+	JSR	PC, EEPING	; is the EEPROM there?
+	TST	R0
+	BEQ	ASK
+	MOV	#MNONE, R1
+	JSR	PC, PMSG
+	HALT
+
+ASK:	MOV	#MLOAD, R1	; ---- the three questions ----
+	JSR	PC, PMSG
+	JSR	PC, GETNUM
+	MOV	R0, LOADA
+	BIT	#1, R0		; must be even
+	BNE	ASKERR
+	MOV	#MWORDS, R1
+	JSR	PC, PMSG
+	JSR	PC, GETNUM
+	MOV	R0, WORDS
+	BEQ	ASKERR		; 1..MAXWDS
+	CMP	R0, #MAXWDS
+	BHI	ASKERR
+	MOV	#MSTART, R1
+	JSR	PC, PMSG
+	JSR	PC, GETNUM
+	MOV	R0, STARTA
+	BEQ	ASKERR		; empty/zero start = a boot to nowhere
+	BIT	#1, R0
+	BNE	ASKERR
+	BR	DOSUM
+ASKERR:	MOV	#MERR, R1
+	JSR	PC, PMSG
+	BR	ASK
+
+; ---- checksum over header + payload, negated ------------------------
+
+DOSUM:	MOV	WORDS, R5
+	ADD	LOADA, R5
+	ADD	STARTA, R5
+	MOV	LOADA, R1
+	MOV	WORDS, R2
+SUM1:	ADD	(R1)+, R5
+	SOB	R2, SUM1
+	NEG	R5
+	MOV	R5, CKSUM	; now everything sums to zero
+
+; ---- write: header, payload, checksum --------------------------------
+
+	MOV	#MWRIT, R1
+	JSR	PC, PMSG
+	CLR	R0		; header at EEPROM 0
+	MOV	#WORDS, R1	; WORDS/LOADA/STARTA are consecutive
+	MOV	#6, R2
+	JSR	PC, EEWR
+	MOV	#6, R0		; payload right behind it
+	MOV	LOADA, R1
+	MOV	WORDS, R2
+	ASL	R2		; bytes (PDP-11 memory is little-endian)
+	JSR	PC, EEWR
+	MOV	WORDS, R0	; checksum at 6 + words*2
+	ASL	R0
+	ADD	#6, R0
+	MOV	#CKSUM, R1
+	MOV	#2, R2
+	JSR	PC, EEWR
+
+; ---- verify: sequential re-read, everything must sum to zero ---------
+
+	JSR	PC, I2CSTA
+	MOV	#EEWA, R0
+	JSR	PC, I2CWR
+	CLR	R0
+	JSR	PC, I2CWR
+	CLR	R0
+	JSR	PC, I2CWR
+	JSR	PC, I2CSTA
+	MOV	#EERA, R0
+	JSR	PC, I2CWR
+	CLR	R5		; running sum
+	MOV	WORDS, R3	; total words = 3 header + payload + 1 sum
+	ADD	#4, R3
+VRFY:	CLR	R1		; ACK everything but the very last byte
+	JSR	PC, I2CRD
+	MOV	R0, -(SP)
+	CLR	R1
+	CMP	R3, #1
+	BNE	VRFY1
+	MOV	#1, R1		; NACK the final byte
+VRFY1:	JSR	PC, I2CRD
+	SWAB	R0
+	BIS	(SP)+, R0
+	ADD	R0, R5
+	SOB	R3, VRFY
+	JSR	PC, I2CSTO
+	TST	R5
+	BNE	VBAD
+	MOV	#MOK, R1
+	JSR	PC, PMSG
+	HALT
+VBAD:	MOV	#MBAD, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- read a number: octal digits, trailing "." = decimal -> R0 -------
+; Digits are collected first and folded once at CR, so a "." anywhere
+; makes the whole entry decimal. Echoes; other characters are ignored.
+
+GETNUM:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	MOV	R4, -(SP)
+	MOV	#NDBUF, R2	; digit collector
+	CLR	R3		; base flag: 0 = octal, 1 = decimal
+GN1:	JSR	PC, GETC
+	CMP	R0, #15		; CR ends
+	BEQ	GN9
+	CMP	R0, #56		; '.' -> decimal
+	BNE	GN2
+	JSR	PC, PUTC
+	MOV	#1, R3
+	BR	GN1
+GN2:	CMP	R0, #60		; '0'..'9'
+	BLO	GN1
+	CMP	R0, #71
+	BHI	GN1
+	CMP	R2, #NDBUF+6	; full: swallow quietly
+	BHIS	GN1
+	JSR	PC, PUTC
+	SUB	#60, R0
+	MOVB	R0, (R2)+
+	BR	GN1
+GN9:	JSR	PC, PCRLF
+	MOV	R2, R1		; end of the digits
+	MOV	#NDBUF, R2
+	CLR	R4		; fold
+GN10:	CMP	R2, R1
+	BHIS	GN14
+	TST	R3
+	BNE	GN11
+	ASH	R4, #3		; value * 8
+	BR	GN12
+GN11:	MOV	R4, R0		; value * 10 = *8 + *2
+	ASH	R4, #3
+	ASL	R0
+	ADD	R0, R4
+GN12:	CLR	R0
+	BISB	(R2)+, R0	; + digit
+	ADD	R0, R4
+	BR	GN10
+GN14:	MOV	R4, R0
+	MOV	(SP)+, R4
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- console ----------------------------------------------------------
+
+PCRLF:	MOV	#15, R0
+	JSR	PC, PUTC
+	MOV	#12, R0
+	JSR	PC, PUTC
+	RTS	PC
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMS2
+	JSR	PC, PUTC
+	BR	PMSG
+PMS2:	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+GETC:	TSTB	@#RCSR
+	BPL	GETC
+	MOVB	@#RBUF, R0
+	BIC	#177600, R0
+	RTS	PC
+
+; ---- data --------------------------------------------------------------
+
+	.EVEN
+WORDS:	.WORD	0		; these three stay consecutive: they are
+LOADA:	.WORD	0		; written to the EEPROM as the header
+STARTA:	.WORD	0
+CKSUM:	.WORD	0
+NDBUF:	.BLKB	6		; collected digits
+	.EVEN
+
+MLOAD:	.ASCII	|Load:  |
+	.BYTE	0
+MWORDS:	.ASCII	|Words: |
+	.BYTE	0
+MSTART:	.ASCII	|Start: |
+	.BYTE	0
+MERR:	.ASCII	/Bad value - again/
+	.BYTE	15, 12, 0
+MWRIT:	.ASCII	/Writing.../
+	.BYTE	15, 12, 0
+MOK:	.ASCII	/OK/
+	.BYTE	15, 12, 0
+MBAD:	.ASCII	/VERIFY BAD/
+	.BYTE	15, 12, 0
+MNONE:	.ASCII	/No AT24C32 at 0x57/
+	.BYTE	15, 12, 0
+	.EVEN
+
+	.INCLUDE "../i2c/i2c.mac"
+	.INCLUDE "../at24c32/at24c32.mac"
+
+	.END	START

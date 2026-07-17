@@ -1,0 +1,71 @@
+; eeboot0.mac — boot ROM stage 0: move the real loader into RAM, run it there
+;
+; Hardware found the hard way: on this system, code that EXECUTES from the
+; boot ROM window while WRITING RAM loses stores when the machine is cold
+; (the only code that ever mixes I/O-page fetches with RAM writes is a boot
+; loader — ODT, serial uploads and normal programs never see it). So the
+; ROM-resident part is reduced to this: copy the real loader (stored across
+; both ROM windows) into RAM at 70000 using PER-WORD VERIFIED writes — each
+; word is read twice from ROM until stable, written, read back twice, and
+; rewritten until it sticks — then jump to it. Everything else (I2C, payload
+; copy, checksums) runs from RAM.
+;
+; No stack, no subroutines, no console here. If a word never sticks after
+; 1000 attempts something is badly broken and stage 0 HALTs — the printed
+; PC (1730xx) is the tell.
+;
+; Layout (matches mkrom.py):
+;	173000-173177	stage 0 (this file, 64 words)
+;	173200-173776	loader image part 1 (192 words)
+;	165000-165776	loader image part 2 (256 words)
+; The loader is assembled at 70000 (see eeboot.mac); stage 0 copies the
+; fixed 192+256 words regardless of the loader's true size — the padding
+; copies harmlessly.
+;
+; Assemble:	m11asm -b 173000 eeboot0.mac
+
+.	= 173000
+
+LDBASE	= 070000		; where the loader lives and runs
+SRC1	= 173200		; image part 1: rest of this window
+N1	= ^D192
+SRC2	= 165000		; image part 2: the second window
+N2	= ^D256
+NTRY	= ^D1000		; write attempts per word before giving up
+
+S0:	MOV	#340, @#177776	; FIRST: priority 7 - no interrupts. ODT's G
+				; starts at priority 0, and one spurious
+				; interrupt through cold-garbage vectors is
+				; a trap storm that shreds RAM and the run.
+	CLR	@#177572	; MMU OFF (MMR0): a power-up trap storm can
+	CLR	@#172516	; leave relocation ENABLED through garbage
+				; maps - programs then read/write scrambled
+				; addresses while console ODT (physical)
+				; sees the truth. Found the very hard way.
+	CLR	R5		; phase 0 = part 1, 1 = part 2
+	MOV	#SRC1, R1
+	MOV	#LDBASE, R2
+	MOV	#N1, R3
+S1:	MOV	(R1), R0	; read until two reads agree
+	CMP	R0, (R1)
+	BNE	S1
+	MOV	#NTRY, R4
+S2:	MOV	R0, (R2)	; verified write: must read back twice
+	CMP	R0, (R2)
+	BNE	S3
+	CMP	R0, (R2)
+	BEQ	S4
+S3:	SOB	R4, S2		; rewrite until it sticks
+	HALT			; RAM never took it - the PC names this spot
+S4:	TST	(R1)+
+	TST	(R2)+
+	SOB	R3, S1
+	TST	R5		; both parts done?
+	BNE	S5
+	INC	R5
+	MOV	#SRC2, R1	; part 2 from the second window
+	MOV	#N2, R3
+	BR	S1
+S5:	JMP	@#LDBASE	; the loader takes it from here, in RAM
+
+	.END	S0

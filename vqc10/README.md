@@ -56,8 +56,10 @@ m11asm -b 1000 clock.mac
 
 Upload `clock.oct`, `1000G`. Same start-up as the `ds3231` demos: OSF check,
 `Set date/time? (y/n)` on the console (forced if the clock lost power), RTC
-kept on NZST, display in NZ local time (NZDT +1 h). The main loop alternates
-panel scan passes with SQW polling; each 1 Hz falling edge re-reads the RTC.
+kept on NZST, display in NZ local time (NZDT +1 h). The prompt defaults to
+"n" after ~5 s of silence, so the clock also starts unattended when booted
+from ROM (see `../eeboot/`). The main loop alternates panel scan passes with
+SQW polling; each 1 Hz falling edge re-reads the RTC.
 
 ## Hardware notes (verified on the real panel, 2026-07-15)
 
