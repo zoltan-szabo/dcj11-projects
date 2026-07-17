@@ -1,13 +1,15 @@
 # eeboot — boot a program from the DS3231 board's EEPROM (SHELVED)
 
-**Status: shelved.** The loader architecture is sound and was verified piece by
-piece on hardware, but standalone booting is blocked by the Multi IO card
-itself: its boot ROM handling does not reliably coexist with the (W65C22S-
-paced) bus — code executing from the boot ROM window alongside VIA/I2C
-activity suffers sporadic corrupted bus cycles that no software can armor
-against. The DCJ-11 and its RAM are fine (the CPU runs at 16 MHz only as a
-concession to the VIA, and is good for 18). Full war story: see HISTORY.md —
-it is instructive.
+**Status: shelved.** The loader architecture is sound and was verified piece
+by piece on hardware — with an SRAM in the boot sockets the window executes
+code cleanly and the full load (I2C read + double verification) succeeds.
+What blocks the mission is a hardware LATCH on the (already-modified) Multi
+IO card: after the boot flow runs, the payload's first VIA port A access
+bus-times-out, and from then on ALL full-speed VIA access traps (ODT-paced
+access still works) from any launch, `G` included — only a power cycle
+clears it. The DCJ-11 and RAM are fine (16 MHz is a VIA concession; the CPU
+is good for 18). Next campaign: the card's boot ROM area and GAL timing,
+equations in hand. Full war story: see HISTORY.md — it is instructive.
 
 What remains useful and works:
 

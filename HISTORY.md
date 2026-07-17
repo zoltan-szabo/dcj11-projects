@@ -59,9 +59,29 @@ on this card destroys the code being executed** (ODT-paced reads restore
 fine, which is why every verify passed). One root cause, ranked by chip
 sensitivity: EPROM immune to read and write disturb, EEPROM vulnerable to
 write glitches (the original power-cycle loss), a 45 ns W27C512 fast
-enough to answer decode ghosts, FRAM fatally read-fragile. Pending one
-control: hellorom from an AT28C64, to bracket whether the window can
-execute simple code at all.
+enough to answer decode ghosts, FRAM fatally read-fragile.
+
+Final chapter (2026-07-18), with a standard SRAM (LH5268A) in the
+sockets: `hellorom` runs perfectly — the window executes code fine — and
+the full eeboot flow loads and verifies the whole clock over I2C from the
+window-resident loader ("EEBOOT .....OK"). The payload then dies on its
+FIRST VIA port A access: CATCH (taught to print the trapped PC) reports
+004446 = mid `MOV #17, @#VIADRA` in VQCINI — a bus timeout. And the state
+is a LATCH: once armed, ODT-paced VIA access still works, but full-speed
+VIA access traps from any launch — `P`, even a plain `1000G` that had
+always worked — and neither the software RESET instruction nor G's bus
+init clears it; only a power cycle does. The loader's own I2C (port B,
+via DDRB/ORB) ran flawlessly moments earlier, so the arming happens
+somewhere between the boot flow and the first port A (DDRA) touch.
+Separation in time is already maximal (stage 0 only copies and jumps;
+everything else runs from RAM) — a latch cannot be architected around.
+
+Context that matters for the sequel: this Multi IO is NOT stock — the
+GAL timing equations were already modified, and the PCB carries three
+added latched-address lines (LAI00-03). The next campaign starts there:
+the boot ROM area and the GAL timing, equations in hand. The SRAM stays
+in the sockets as the playground. Until then: shelved, mechanisms mapped,
+loader ready, and the machine still tells the time via 1000G.
 
 ## VQC10 panel project (2026-07-15)
 

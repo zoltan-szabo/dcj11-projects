@@ -105,7 +105,10 @@ STDL1:	SOB	R0, STDL1	; machine buys itself warm-up time
 	MOV	#MOK, R1
 	JSR	PC, PMSG
 	MOV	HSTART, R2
-	JMP	(R2)		; run it
+	RESET			; BINIT, exactly like ODT's G: hand the
+	JMP	(R2)		; payload a freshly reset bus - without
+				; it the first VIA access after the
+				; loader's I2C session times out (NXM)
 
 ; sum the header + the payload AS IT SITS IN RAM; Z set = clean
 
@@ -139,10 +142,42 @@ FAIL:	MOV	#MBAD, R1
 ; it is warm enough to stay up ("!" marks each restart)
 
 CATCH:	MOV	#340, @#177776	; re-arm from whatever state the wreck left
-	MOV	#1000, SP
+	MOV	SP, R1		; the trap frame holds the guilty PC -
+	MOV	#1000, SP	; name it before rebooting
 	MOV	#41, R0		; "!"
 	JSR	PC, PUTC
-	JMP	BOOT
+	BIT	#1, R1		; only dereference a sane-looking SP
+	BNE	CATCH2
+	CMP	R1, #170000
+	BHIS	CATCH2
+	MOV	(R1), R0	; trapped PC
+	JSR	PC, POCT
+CATCH2:	JMP	BOOT
+
+; print R0 as six octal digits (diagnostics)
+
+POCT:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	MOV	R0, R3
+	CLR	R0		; first digit: bit 15
+	ROL	R3
+	ROL	R0
+	ADD	#60, R0
+	JSR	PC, PUTC
+	MOV	#5, R2		; five 3-bit digits
+POCT1:	CLR	R0
+	ROL	R3
+	ROL	R0
+	ROL	R3
+	ROL	R0
+	ROL	R3
+	ROL	R0
+	ADD	#60, R0
+	JSR	PC, PUTC
+	SOB	R2, POCT1
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
 
 ; ---- open a sequential read at EEPROM address 0 ---------------------
 ; Retries from here if the EEPROM does not ACK (absent board).
