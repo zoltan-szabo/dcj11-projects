@@ -1,0 +1,41 @@
+; hellorom.mac — the smallest possible boot ROM program: say hello, halt
+;
+; Lives in the Multi IO boot ROM window (17773000 physical; programs and G
+; reach it as 173000) and only prints to the console — no I2C, no payload,
+; no relocation. The minimal probe of "can code execute from the boot ROM
+; window at all": if this prints cleanly, the window's fetch+console path
+; works; if it mangles or dies, the fault needs nothing else to show itself.
+;
+; ROM rules apply: no writes to self, and the boot hygiene learned the hard
+; way — priority 7 and MMU off before anything (see eeboot0.mac / HISTORY).
+;
+; Assemble:	m11asm -b 173000 hellorom.mac
+; Upload:	the .oct header must be @17773000 (console ODT deposits use
+;		the address AS TYPED - 6-digit 173000 would land in RAM!);
+;		hellorom-up.oct is that ready-made variant.
+; Run:		173000G
+
+.	= 173000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+
+HELLO:	MOV	#340, @#177776	; priority 7 - no storm fuel
+	CLR	@#177572	; MMU off (MMR0)
+	CLR	@#172516	; MMR3 too
+	MOV	#1000, SP
+	MOV	#MSG, R1
+LOOP:	MOVB	(R1)+, R0
+	BEQ	DONE
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	BR	LOOP
+DONE:	HALT			; back to ODT (PC printout = DONE+2)
+	BR	DONE		; in case of P
+
+MSG:	.ASCII	/Hello from the BOOTROM!/
+	.BYTE	15, 12, 0
+	.EVEN
+
+	.END	HELLO

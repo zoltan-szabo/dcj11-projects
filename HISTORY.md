@@ -49,6 +49,20 @@ EEPROM behind it) and the boot EPROM cannot be used together. Shelved;
 `eeburn` and the image format remain useful, and the loader is ready
 should the ROM path ever become trustworthy.
 
+Closing exhibit (`hellorom.mac`, a 34-word print-and-halt with no writes
+to the window): uploaded to an FM1608 FRAM and disassembled back perfect,
+it froze on G — and afterwards the ROM content had changed, scattered
+words replaced by garbage, including the first fetch. FRAM reads are
+destructive with an internal restore; the card's marginal ROM-select
+timing interrupts restores at full fetch speed, so **executing from FRAM
+on this card destroys the code being executed** (ODT-paced reads restore
+fine, which is why every verify passed). One root cause, ranked by chip
+sensitivity: EPROM immune to read and write disturb, EEPROM vulnerable to
+write glitches (the original power-cycle loss), a 45 ns W27C512 fast
+enough to answer decode ghosts, FRAM fatally read-fragile. Pending one
+control: hellorom from an AT28C64, to bracket whether the window can
+execute simple code at all.
+
 ## VQC10 panel project (2026-07-15)
 
 `vqc10/vqc10.mac` drives the "DisplayVQC10" panel (Konstantin Repnikov,
