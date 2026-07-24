@@ -1,0 +1,18 @@
+{
+  "build" : {
+    "autosave" : true,
+    "lstPageBreaks" : false,
+    "makeLst" : true,
+    "makeSym" : true,
+    "outputDir" : "."
+  },
+  "files" : [
+    "nettest.mac",
+    "enc.mac",
+    "../spi/spi.mac"
+  ],
+  "main" : "nettest.mac",
+  "name" : "nettest",
+  "origin" : "1000",
+  "schema" : 1
+}

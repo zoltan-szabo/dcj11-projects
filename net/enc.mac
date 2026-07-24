@@ -1,0 +1,390 @@
+; enc.mac — ENC28J60 Ethernet controller driver (register level)
+;
+; Talks to the chip over spi.mac. The ENC28J60's register file is four
+; banks of 32; a register is named here by one byte:
+;
+;	bits 0-4  address within the bank
+;	bits 5-6  bank number
+;	bit 7     MAC/MII register - reads return a dummy byte first
+;
+; ENCRD/ENCWR switch banks automatically (cached, so repeated access to
+; one bank costs nothing). The five common registers (EIE..ECON1, 033-037)
+; are visible from every bank, so their bank bits are don't-care.
+;
+; API (all preserve R2-R5):
+;	ENCRST	hardware reset via the RESET pin, waits for ESTAT.CLKRDY;
+;		returns R0 = 0 ok / 1 timeout (SPI or clock dead)
+;	ENCRD	R0 = register       -> R0 = value
+;	ENCWR	R0 = register, R1 = value
+;	ENCBFS	R0 = ETH register, R1 = bits to set   (BFS command)
+;	ENCBFC	R0 = ETH register, R1 = bits to clear (BFC command)
+;	ENCPHR	R0 = PHY register   -> R0 = 16-bit value
+;	ENCPHW	R0 = PHY register, R1 = 16-bit value
+;	ENCINI	full chip init: buffers, MAC (from ENCMAC), PHY, RX enabled;
+;		half duplex, static setup - call after ENCRST
+;
+; The MAC address lives at ENCMAC (6 bytes) below - edit to taste.
+;
+; Buffer plan (8 KB total):  RX 000000-014777, TX 015000-017777.
+; Errata respected: RX buffer starts at 0 (#5), ERXRDPT kept odd (#14),
+; hardware reset used instead of SRC (#2, CLKRDY unreliable after SRC).
+
+; ---- registers -------------------------------------------------------
+
+; common (all banks)
+EIE	= 033
+EIR	= 034
+ESTAT	= 035
+ECON2	= 036
+ECON1	= 037
+
+; bank 0
+ERDPTL	= 000
+ERDPTH	= 001
+EWRPTL	= 002
+EWRPTH	= 003
+ETXSTL	= 004
+ETXSTH	= 005
+ETXNDL	= 006
+ETXNDH	= 007
+ERXSTL	= 010
+ERXSTH	= 011
+ERXNDL	= 012
+ERXNDH	= 013
+ERXRDL	= 014
+ERXRDH	= 015
+
+; bank 1
+ERXFCO	= 070			; ERXFCON - receive filters
+EPKTCN	= 071			; EPKTCNT - pending packet count
+
+; bank 2 (MAC/MII: flag 200)
+MACON1	= 300
+MACON3	= 302
+MACON4	= 303
+MABBIP	= 304			; MABBIPG - back-to-back gap
+MAIPGL	= 306
+MAIPGH	= 307
+MAMXFL	= 312			; MAMXFLL (H is +1)
+MAMXFH	= 313
+MICMD	= 322
+MIREGA	= 324			; MIREGADR
+MIWRL	= 326
+MIWRH	= 327
+MIRDL	= 330
+MIRDH	= 331
+
+; bank 3
+MAADR5	= 340
+MAADR6	= 341
+MAADR3	= 342
+MAADR4	= 343
+MAADR1	= 344			; first octet of the MAC address
+MAADR2	= 345
+MISTAT	= 352
+EREVID	= 162			; silicon revision (ETH register)
+
+; PHY registers (through the MII)
+PHCON1	= 000
+PHSTA1	= 001			; PHSTAT1
+PHID1	= 002			; reads 000203 on a live chip
+PHID2	= 003
+PHCON2	= 020
+PHSTA2	= 021			; PHSTAT2 - bit 2000 = LSTAT, link up
+
+; bits
+CLKRDY	= 001			; ESTAT
+RXEN	= 004			; ECON1
+AUTOIN	= 200			; ECON2 AUTOINC
+MIIRD	= 001			; MICMD
+MIBUSY	= 001			; MISTAT
+LSTAT	= 2000			; PHSTAT2
+HDLDIS	= 400			; PHCON2
+
+; buffer layout
+RXSTRT	= 0			; erratum 5: RX must start at 0
+RXEND	= 14777			; 6.5 KB for receive
+TXSTRT	= 15000			; 1.5 KB for one transmit frame
+
+; ---- hardware reset -> R0 = 0 ok / 1 no clock -----------------------
+
+ENCRST:	MOV	R3, -(SP)
+	MOV	#377, CURBNK	; cache invalid until first select
+	JSR	PC, SPIRSL
+	MOV	#2, R0		; a couple of ms in reset (400 ns needed)
+	JSR	PC, ENCDLY
+	JSR	PC, SPIRSH
+	MOV	#5, R0		; oscillator start-up
+	JSR	PC, ENCDLY
+	MOV	#^D2000, R3
+ENCRS1:	MOV	#ESTAT, R0
+	JSR	PC, ENCRD
+	BIT	#CLKRDY, R0
+	BNE	ENCRS2
+	SOB	R3, ENCRS1
+	MOV	#1, R0		; never came ready
+	BR	ENCRS3
+ENCRS2:	CLR	R0
+ENCRS3:	MOV	(SP)+, R3
+	RTS	PC
+
+; ---- ~1 ms * R0 busy delay ------------------------------------------
+
+ENCDLY:	MOV	R1, -(SP)
+ENCDL1:	MOV	#^D3800, R1
+ENCDL2:	SOB	R1, ENCDL2
+	DEC	R0
+	BNE	ENCDL1
+	MOV	(SP)+, R1
+	RTS	PC
+
+; ---- bank select (internal): R0 = register handle, preserved --------
+
+ENCBNK:	MOV	R0, -(SP)
+	MOV	R1, -(SP)
+	BIC	#177637, R0	; isolate the bank bits (140)
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	ASR	R0		; -> 0..3
+	CMP	R0, CURBNK
+	BEQ	ENCBK9		; already there
+	MOV	R0, CURBNK
+	MOV	R0, R1
+	JSR	PC, SPICSL	; BFC ECON1: clear BSEL1:0
+	MOV	#277, R0	; 240 (BFC) + 037 (ECON1)
+	JSR	PC, SPIXFR
+	MOV	#3, R0
+	JSR	PC, SPIXFR
+	JSR	PC, SPICSH
+	JSR	PC, SPICSL	; BFS ECON1: set the new bank
+	MOV	#237, R0	; 200 (BFS) + 037 (ECON1)
+	JSR	PC, SPIXFR
+	MOV	R1, R0
+	JSR	PC, SPIXFR
+	JSR	PC, SPICSH
+ENCBK9:	MOV	(SP)+, R1
+	MOV	(SP)+, R0
+	RTS	PC
+
+; ---- read a register: R0 = handle -> R0 = value ---------------------
+
+ENCRD:	MOV	R1, -(SP)
+	MOV	R0, R1
+	JSR	PC, ENCBNK
+	JSR	PC, SPICSL
+	MOV	R1, R0
+	BIC	#340, R0	; RCR opcode is the bare address
+	JSR	PC, SPIXFR
+	CLR	R0
+	JSR	PC, SPIXFR
+	BIT	#200, R1	; MAC/MII: that byte was a dummy
+	BEQ	ENCRD1
+	CLR	R0
+	JSR	PC, SPIXFR
+ENCRD1:	JSR	PC, SPICSH
+	MOV	(SP)+, R1
+	RTS	PC
+
+; ---- write a register: R0 = handle, R1 = value ----------------------
+
+ENCWR:	MOV	R2, -(SP)
+	MOV	R0, R2
+	JSR	PC, ENCBNK
+	JSR	PC, SPICSL
+	MOV	R2, R0
+	BIC	#340, R0
+	BIS	#100, R0	; WCR
+	JSR	PC, SPIXFR
+	MOV	R1, R0
+	JSR	PC, SPIXFR
+	JSR	PC, SPICSH
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- bit set / bit clear (ETH registers only): R0 = reg, R1 = bits --
+
+ENCBFS:	MOV	R2, -(SP)
+	MOV	#200, R2	; BFS
+	BR	ENCBF0
+ENCBFC:	MOV	R2, -(SP)
+	MOV	#240, R2	; BFC
+ENCBF0:	MOV	R0, -(SP)
+	JSR	PC, ENCBNK
+	JSR	PC, SPICSL
+	MOV	(SP)+, R0
+	BIC	#340, R0
+	BIS	R2, R0
+	JSR	PC, SPIXFR
+	MOV	R1, R0
+	JSR	PC, SPIXFR
+	JSR	PC, SPICSH
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- PHY read: R0 = PHY register -> R0 = 16-bit value ---------------
+
+ENCPHR:	MOV	R1, -(SP)
+	MOV	R2, -(SP)
+	MOV	R0, R1
+	MOV	#MIREGA, R0
+	JSR	PC, ENCWR
+	MOV	#MIIRD, R1
+	MOV	#MICMD, R0
+	JSR	PC, ENCWR
+	MOV	#^D10000, R2	; ~10 us on the chip; poll until done
+ENCPR1:	MOV	#MISTAT, R0
+	JSR	PC, ENCRD
+	BIT	#MIBUSY, R0
+	BEQ	ENCPR2
+	SOB	R2, ENCPR1
+ENCPR2:	CLR	R1
+	MOV	#MICMD, R0
+	JSR	PC, ENCWR
+	MOV	#MIRDL, R0
+	JSR	PC, ENCRD
+	MOV	R0, R2
+	MOV	#MIRDH, R0
+	JSR	PC, ENCRD
+	SWAB	R0
+	BIS	R2, R0
+	MOV	(SP)+, R2
+	MOV	(SP)+, R1
+	RTS	PC
+
+; ---- PHY write: R0 = PHY register, R1 = 16-bit value ----------------
+
+ENCPHW:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	MOV	R0, R2		; R2 = PHY register
+	MOV	R1, R3		; R3 = value
+	MOV	R2, R1
+	MOV	#MIREGA, R0
+	JSR	PC, ENCWR	; MIREGADR <- register
+	MOV	R3, R1
+	BIC	#177400, R1
+	MOV	#MIWRL, R0
+	JSR	PC, ENCWR	; low byte first...
+	MOV	R3, R1
+	SWAB	R1
+	BIC	#177400, R1
+	MOV	#MIWRH, R0
+	JSR	PC, ENCWR	; ...high byte starts the MII write
+	MOV	#^D10000, R2
+ENCPW1:	MOV	#MISTAT, R0
+	JSR	PC, ENCRD
+	BIT	#MIBUSY, R0
+	BEQ	ENCPW2
+	SOB	R2, ENCPW1
+ENCPW2:	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- full init (call after ENCRST) ----------------------------------
+
+ENCINI:	MOV	R1, -(SP)
+	; receive buffer 0..RXEND, read pointer parked at the end (odd)
+	MOV	#ERXSTL, R0
+	CLR	R1
+	JSR	PC, ENCWR
+	MOV	#ERXSTH, R0
+	CLR	R1
+	JSR	PC, ENCWR
+	MOV	#ERXNDL, R0
+	MOV	#377, R1
+	JSR	PC, ENCWR
+	MOV	#ERXNDH, R0
+	MOV	#31, R1
+	JSR	PC, ENCWR
+	MOV	#ERXRDL, R0
+	MOV	#377, R1
+	JSR	PC, ENCWR
+	MOV	#ERXRDH, R0
+	MOV	#31, R1
+	JSR	PC, ENCWR
+	MOV	#ERDPTL, R0	; buffer-memory read pointer to the start
+	CLR	R1
+	JSR	PC, ENCWR
+	MOV	#ERDPTH, R0
+	CLR	R1
+	JSR	PC, ENCWR
+	; receive filters: unicast + broadcast, CRC checked
+	MOV	#ERXFCO, R0
+	MOV	#241, R1	; UCEN + CRCEN + BCEN
+	JSR	PC, ENCWR
+	; MAC, half duplex
+	MOV	#MACON1, R0
+	MOV	#1, R1		; MARXEN
+	JSR	PC, ENCWR
+	MOV	#MACON3, R0
+	MOV	#62, R1		; PADCFG=1 (pad to 60 + CRC), TXCRCEN, FRMLNEN
+	JSR	PC, ENCWR
+	MOV	#MACON4, R0
+	MOV	#100, R1	; DEFER
+	JSR	PC, ENCWR
+	MOV	#MABBIP, R0
+	MOV	#22, R1		; back-to-back gap, half duplex value
+	JSR	PC, ENCWR
+	MOV	#MAIPGL, R0
+	MOV	#22, R1
+	JSR	PC, ENCWR
+	MOV	#MAIPGH, R0
+	MOV	#14, R1
+	JSR	PC, ENCWR
+	MOV	#MAMXFL, R0	; max frame 1518
+	MOV	#356, R1
+	JSR	PC, ENCWR
+	MOV	#MAMXFH, R0
+	MOV	#5, R1
+	JSR	PC, ENCWR
+	; station address (note the register order quirk)
+	MOV	#MAADR1, R0
+	MOVB	ENCMAC+0, R1
+	BIC	#177400, R1
+	JSR	PC, ENCWR
+	MOV	#MAADR2, R0
+	MOVB	ENCMAC+1, R1
+	BIC	#177400, R1
+	JSR	PC, ENCWR
+	MOV	#MAADR3, R0
+	MOVB	ENCMAC+2, R1
+	BIC	#177400, R1
+	JSR	PC, ENCWR
+	MOV	#MAADR4, R0
+	MOVB	ENCMAC+3, R1
+	BIC	#177400, R1
+	JSR	PC, ENCWR
+	MOV	#MAADR5, R0
+	MOVB	ENCMAC+4, R1
+	BIC	#177400, R1
+	JSR	PC, ENCWR
+	MOV	#MAADR6, R0
+	MOVB	ENCMAC+5, R1
+	BIC	#177400, R1
+	JSR	PC, ENCWR
+	; PHY: half duplex, and no loopback of our own transmissions
+	MOV	#PHCON1, R0
+	CLR	R1
+	JSR	PC, ENCPHW
+	MOV	#PHCON2, R0
+	MOV	#HDLDIS, R1
+	JSR	PC, ENCPHW
+	; go: auto-increment buffer pointers, enable reception
+	MOV	#ECON2, R0
+	MOV	#AUTOIN, R1
+	JSR	PC, ENCBFS
+	MOV	#ECON1, R0
+	MOV	#RXEN, R1
+	JSR	PC, ENCBFS
+	MOV	(SP)+, R1
+	RTS	PC
+
+; ---- state -----------------------------------------------------------
+
+	.EVEN
+CURBNK:	.WORD	377		; bank currently selected (377 = unknown)
+
+; station MAC address: locally administered
+ENCMAC:	.BYTE	2, 334, 21, 0, 1, 231	; 02:DC:11:00:01:99
+	.EVEN
