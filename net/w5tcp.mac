@@ -1,0 +1,335 @@
+; w5tcp.mac — rung 5: TCP listener on port 23, banner with DS3231 time
+;
+; Socket 0 in TCP mode, LISTEN on 23. On connect the greeting line
+; carries the time of day read from the DS3231 over I2C (PB0/1 — the
+; RTC and the W5500 share port B by design; I2CINI is called before the
+; read because SPI's read-modify-write port accesses leave the I2C ORB
+; bits set). Then everything received is echoed back, with the byte
+; count live on the VQC10 panel ("TCP nnnnn"). One connection at a
+; time; on disconnect the socket is closed and re-listened.
+;
+; Test:	nc 10.1.0.199 23	(clean byte stream)
+;	telnet 10.1.0.199	(works; its IAC negotiation bytes are
+;				 echoed back as a little junk, harmless)
+;
+; Assemble:	part of w5tcp.prj (origin 1000); run with P or 1000G.
+
+.	= 1000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+MAXPAY	= ^D512			; echo chunk (larger RSR drains over laps)
+DSADR	= 150			; DS3231 7-bit I2C address (0x68)
+
+; socket 0 TCP status values / extra commands
+SINIT	= 023			; SOCK_INIT after OPEN in TCP mode
+SLISTN	= 024			; SOCK_LISTEN
+SESTAB	= 027			; SOCK_ESTABLISHED
+SCLOSW	= 034			; SOCK_CLOSE_WAIT - peer sent FIN
+CRLIST	= 2			; LISTEN
+CRDISC	= 10			; DISCON (graceful FIN)
+
+START:	MOV	#340, @#177776	; priority 7
+	MOV	#1000, SP
+	MOV	#MHELLO, R1
+	JSR	PC, PMSG
+
+	JSR	PC, SPIINI
+	JSR	PC, W5RST
+	MOV	#VERSIO, R0	; sanity gate
+	JSR	PC, W5RD
+	CMP	R0, #4
+	BEQ	VEROK
+	MOV	#MNOSPI, R1
+	JSR	PC, PMSG
+	HALT
+
+VEROK:	MOV	#W5SHAR, R0	; network config (proven by w5test)
+	MOV	#MACADR, R1
+	MOV	#6, R2
+	JSR	PC, W5WRN
+	MOV	#W5SIPR, R0
+	MOV	#IPADR, R1
+	MOV	#4, R2
+	JSR	PC, W5WRN
+	MOV	#W5SUBR, R0
+	MOV	#MASK, R1
+	MOV	#4, R2
+	JSR	PC, W5WRN
+	MOV	#W5GAR, R0
+	MOV	#GWADR, R1
+	MOV	#4, R2
+	JSR	PC, W5WRN
+	JSR	PC, VQCINI
+
+; ---- open the socket and listen -------------------------------------
+
+REOPEN:	MOV	#PWAIT, R0	; panel: "TCP WAIT"
+	CLR	R1
+	JSR	PC, VQCSTR
+	MOV	#S0CR, R0	; from any leftover state
+	MOV	#20, R1		; CLOSE
+	JSR	PC, W5SWR
+	MOV	#S0MR, R0	; TCP mode
+	MOV	#1, R1
+	JSR	PC, W5SWR
+	MOV	#S0PORT, R0	; port 23
+	MOV	#27, R1
+	JSR	PC, W5SWRW
+	MOV	#S0CR, R0
+	MOV	#CROPEN, R1
+	JSR	PC, W5SWR
+	MOV	#^D1000, R3
+WINIT:	MOV	#S0SR, R0
+	JSR	PC, W5SRD
+	CMP	R0, #SINIT
+	BEQ	GOLIST
+	SOB	R3, WINIT
+	MOV	#MNOSOK, R1
+	JSR	PC, PMSG
+	HALT
+GOLIST:	MOV	#S0CR, R0
+	MOV	#CRLIST, R1
+	JSR	PC, W5SWR
+	MOV	#MLISTN, R1
+	JSR	PC, PMSG
+
+WAITC:	JSR	PC, VQCSCN	; wait for a caller, panel alive
+	MOV	#S0SR, R0
+	JSR	PC, W5SRD
+	CMP	R0, #SESTAB
+	BEQ	CONN
+	CMP	R0, #SLISTN
+	BEQ	WAITC
+	JMP	REOPEN		; reset/abort - rearm
+
+; ---- connected: greet with the time, then echo ----------------------
+
+CONN:	MOV	#MCONN, R1
+	JSR	PC, PMSG
+	JSR	PC, I2CINI	; SPI's port RMWs set the I2C ORB bits -
+	MOV	#DSADR, R0	; re-idle the bus before touching the RTC
+	JSR	PC, I2CPING
+	TST	R0
+	BNE	NORTC		; no RTC: banner keeps "..:..:.."
+	JSR	PC, I2CSTA	; read sec/min/hour (BCD, regs 0-2)
+	MOV	#320, R0
+	JSR	PC, I2CWR
+	CLR	R0
+	JSR	PC, I2CWR
+	JSR	PC, I2CSTA
+	MOV	#321, R0
+	JSR	PC, I2CWR
+	CLR	R1
+	JSR	PC, I2CRD
+	MOV	R0, SECS
+	CLR	R1
+	JSR	PC, I2CRD
+	MOV	R0, MINS
+	MOV	#1, R1		; NACK the last byte
+	JSR	PC, I2CRD
+	MOV	R0, HRS
+	JSR	PC, I2CSTO
+	MOV	HRS, R0		; patch HH:MM:SS into the banner
+	BIC	#177700, R0	; 24 h mode: tens in bits 4-5
+	MOV	#BTIME, R1
+	JSR	PC, BCD2A
+	MOV	MINS, R0
+	BIC	#177600, R0
+	MOV	#BTIME+3, R1
+	JSR	PC, BCD2A
+	MOV	SECS, R0
+	BIC	#177600, R0
+	MOV	#BTIME+6, R1
+	JSR	PC, BCD2A
+NORTC:	MOV	#BANNER, R1
+	MOV	#BANLEN, R2
+	JSR	PC, TCPSND
+	CLR	COUNT
+	JSR	PC, SHOWCT
+
+ECHO:	JSR	PC, VQCSCN
+	MOV	#S0SR, R0	; still established?
+	JSR	PC, W5SRD
+	CMP	R0, #SESTAB
+	BEQ	ECHO1
+	CMP	R0, #SCLOSW	; peer said goodbye: answer the FIN
+	BNE	GONE
+	MOV	#S0CR, R0
+	MOV	#CRDISC, R1
+	JSR	PC, W5SWR
+GONE:	MOV	#MBYE, R1
+	JSR	PC, PMSG
+	JMP	REOPEN
+
+ECHO1:	MOV	#S0RXRS, R0	; bytes waiting - two agreeing reads
+	JSR	PC, W5SRDW
+	MOV	R0, R4
+	MOV	#S0RXRS, R0
+	JSR	PC, W5SRDW
+	CMP	R0, R4
+	BNE	ECHO
+	TST	R4
+	BEQ	ECHO
+	CMP	R4, #MAXPAY	; big bursts drain MAXPAY per lap
+	BLOS	ECHO2
+	MOV	#MAXPAY, R4
+ECHO2:	MOV	#S0RXRD, R0
+	JSR	PC, W5SRDW
+	MOV	R0, R5
+	MOV	R5, R0		; TCP is a bare stream: no header
+	MOV	#PAYBUF, R1
+	MOV	R4, R2
+	JSR	PC, W5RXRD
+	MOV	R5, R1		; RD += n, hand the buffer back
+	ADD	R4, R1
+	MOV	#S0RXRD, R0
+	JSR	PC, W5SWRW
+	MOV	#S0CR, R0
+	MOV	#CRRECV, R1
+	JSR	PC, W5SWR
+	MOV	#PAYBUF, R1
+	MOV	R4, R2
+	JSR	PC, TCPSND
+	ADD	R4, COUNT
+	JSR	PC, SHOWCT
+	JMP	ECHO
+
+; ---- send R2 bytes at R1 on the established connection --------------
+
+TCPSND:	MOV	R1, SNDP
+	MOV	R2, SNDL
+	MOV	#S0TXWR, R0
+	JSR	PC, W5SRDW
+	MOV	R0, R5
+	MOV	R5, R0
+	MOV	SNDP, R1
+	MOV	SNDL, R2
+	JSR	PC, W5TXWR
+	MOV	R5, R1
+	ADD	SNDL, R1
+	MOV	#S0TXWR, R0
+	JSR	PC, W5SWRW
+	MOV	#S0CR, R0
+	MOV	#CRSEND, R1
+	JSR	PC, W5SWR
+	MOV	#^D30000, R3
+TSND1:	MOV	#S0IR, R0
+	JSR	PC, W5SRD
+	BIT	#SENDOK, R0
+	BNE	TSND2
+	MOV	#S0SR, R0	; peer vanished mid-send: give up, the
+	JSR	PC, W5SRD	; main loop's status check cleans up
+	CMP	R0, #SESTAB
+	BNE	TSND3
+	SOB	R3, TSND1
+	RTS	PC
+TSND2:	MOV	#S0IR, R0
+	MOV	#SENDOK, R1
+	JSR	PC, W5SWR
+TSND3:	RTS	PC
+
+; ---- BCD byte R0 -> two ASCII digits at (R1)+ -----------------------
+
+BCD2A:	MOV	R2, -(SP)
+	MOV	R0, R2
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	ADD	#60, R0
+	MOVB	R0, (R1)+
+	BIC	#177760, R2
+	ADD	#60, R2
+	MOVB	R2, (R1)+
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- panel: "TCP nnnnn" (echoed bytes, decimal) ---------------------
+; Clobbers R0-R5 (callers re-fetch what they need).
+
+SHOWCT:	MOV	#PTCP, R0
+	CLR	R1
+	JSR	PC, VQCSTR
+	MOV	COUNT, WRK
+	MOV	#DECPWR, R4
+	MOV	#3, R5
+SHOW1:	CLR	R0
+SHOW2:	CMP	WRK, (R4)
+	BLO	SHOW3
+	SUB	(R4), WRK
+	INC	R0
+	BR	SHOW2
+SHOW3:	ADD	#60, R0
+	MOV	R5, R1
+	JSR	PC, VQCPUT
+	INC	R5
+	TST	(R4)+
+	CMP	R4, #DECEND
+	BLO	SHOW1
+	RTS	PC
+
+DECPWR:	.WORD	^D10000, ^D1000, ^D100, ^D10, 1
+DECEND:
+
+; ---- console ---------------------------------------------------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMSG2
+	JSR	PC, PUTC
+	BR	PMSG
+PMSG2:	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+; ---- messages and data ----------------------------------------------
+
+MHELLO:	.ASCII	/W5TCP/
+	.BYTE	15, 12, 0
+MNOSPI:	.ASCII	/BUS DEAD - CHECK POWER, DIVIDERS, MISO/
+	.BYTE	15, 12, 0
+MNOSOK:	.ASCII	/SOCKET WOULD NOT OPEN/
+	.BYTE	15, 12, 0
+MLISTN:	.ASCII	/LISTENING - TCP PORT 23 AT 10.1.0.199/
+	.BYTE	15, 12, 0
+MCONN:	.ASCII	/CONNECT/
+	.BYTE	15, 12, 0
+MBYE:	.ASCII	/DISCONNECT/
+	.BYTE	15, 12, 0
+PWAIT:	.ASCII	/TCP WAIT/
+	.BYTE	0
+PTCP:	.ASCII	/TCP /
+	.BYTE	0
+
+BANNER:	.ASCII	/DCJ-11 SBC READY - /
+BTIME:	.ASCII	/..:..:../
+	.BYTE	15, 12
+BANEND:
+BANLEN	= BANEND - BANNER
+
+	.EVEN
+MACADR:	.BYTE	2, 334, 21, 0, 1, 231	; 02:DC:11:00:01:99
+IPADR:	.BYTE	12, 1, 0, 307		; 10.1.0.199
+MASK:	.BYTE	377, 377, 377, 0	; /24
+GWADR:	.BYTE	12, 1, 0, 1		; 10.1.0.1
+	.EVEN
+COUNT:	.WORD	0
+WRK:	.WORD	0
+SNDP:	.WORD	0
+SNDL:	.WORD	0
+SECS:	.WORD	0
+MINS:	.WORD	0
+HRS:	.WORD	0
+PAYBUF:	.BLKB	MAXPAY
+	.EVEN
+
+	.INCLUDE "w5500.mac"
+	.INCLUDE "../spi/spi.mac"
+	.INCLUDE "../i2c/i2c.mac"
+	.INCLUDE "../vqc10/vqc10.mac"
+	.INCLUDE "../max7219/font5x7.mac"
+
+	.END	START

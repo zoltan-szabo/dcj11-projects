@@ -30,6 +30,17 @@ diagnostic slow mode (remove SPIDLY for speed; W5500 has no minimum).
 Next rungs: UDP echo (socket 0, nc -u), then TCP LISTEN port 23 — a
 telnet-able PDP-11 with the chip doing the TCP state machine.
 
+Rung 5 same day: `w5tcp.mac` — TCP listener on port 23. The greeting
+line reads the DS3231 over I2C at connect time ("DCJ-11 SBC READY -
+HH:MM:SS", live: a reconnect two seconds later showed the clock two
+seconds on) — port B carries I2C (PB0/1), SQW (PB2) and SPI (PB3-7)
+at once, with I2CINI re-run before each RTC read because SPI's port
+RMWs set the I2C ORB bits (the gotcha called out below, now load-
+bearing). Echo loop with the byte count on the VQC10; FIN answered
+with DISCON and the socket re-armed - serial reconnects work. Verified:
+banner + 20/20 lines byte-correct, a 1500-byte burst (three 512-byte
+laps) exact, reconnect clean. Four drivers, one VIA, no collisions.
+
 Same day, rung 4 verified on hardware: `w5udp.mac` echoes UDP on port
 7 with the packet count live on the VQC10 panel ("UDP nnnnn") — 50/50
 packets byte-correct at ~40 ms RTT (latency = the VQCSCN scan pass per
