@@ -1,0 +1,323 @@
+; netmon.mac — ODT-style monitor served over the network console
+;
+; A software monitor speaking (a useful subset of) console ODT, on
+; netcon: usable from the physical console, from `nc 10.1.0.199 23`,
+; or both at once. Commands:
+;
+;	NNNNNN/		open word, print contents
+;	  value CR	  deposit and close (plain CR = close, no change)
+;	  value LF	  deposit/close, open the NEXT word
+;	Rn/  RS/	open saved register n / saved PS (see below)
+;	NNNNNN G	jump to address (SP=1000, PRI 7, vectors stay ours)
+;	?		anything else
+;
+; "Registers" are the frame captured by CATCH: this monitor owns every
+; vector, so when a launched program traps, CATCH saves R0-R5/SP/PC/PS,
+; prints !PC, and returns to the prompt - examine the wreck, patch,
+; G again. The eeboot self-healing idea, grown a REPL.
+;
+; Addressing is 16-bit: the top 8 KB window means 173000/ here reads
+; physical 17773000 (the boot ROM window) - handy, and NOT how console
+; ODT treats a typed 173000 (that one is RAM; the old lesson inverted).
+;
+; The monitor sits at 40000 (stack just below); payloads keep their
+; usual 1000. G hands over fully - the way back is a trap into CATCH,
+; or the physical HALT switch. A fresh TCP caller always gets a fresh
+; banner and parser; the SLU shares the same session.
+;
+; Assemble:	part of netmon.prj (origin 40000); start once with P or
+;		40000G - from then on it IS the console.
+
+.	= 40000
+
+START:	MOV	#340, @#177776	; priority 7
+	MOV	#40000, SP
+	CLR	R0		; own every vector: traps come home
+VECF:	MOV	#CATCH, (R0)+
+	MOV	#340, (R0)+
+	CMP	R0, #1000
+	BLO	VECF
+	JSR	PC, NCINI
+	TST	R0
+	BEQ	NETOK
+	MOV	#MNONET, R1	; no W5500: still a serial monitor
+	JSR	PC, PUTS
+NETOK:	JSR	PC, NEWSES
+
+MLOOP:	JSR	PC, NCFLSH	; prompt (and echoes) reach the wire
+GWAIT:	TST	NCNEW		; fresh caller: greet, start clean
+	BEQ	GW1
+	CLR	NCNEW
+	JSR	PC, NEWSES
+	BR	MLOOP
+GW1:	JSR	PC, NCPOLC
+	CMP	R0, #-1
+	BEQ	GWAIT
+	TST	R0		; NULs (and telnet padding) are noise
+	BEQ	GWAIT
+	CMP	R0, #177	; anything 8-bit (telnet IAC) too
+	BHI	GWAIT
+	CMP	R0, #12		; the LF of a CRLF was handled with CR
+	BNE	GW2
+	TST	LASTCR
+	BEQ	GW2
+	CLR	LASTCR
+	BR	GWAIT
+GW2:	CLR	LASTCR
+
+	CMP	R0, #15		; dispatch (handlers are far: jump island)
+	BEQ	JDOCR
+	CMP	R0, #12
+	BEQ	JDOLF
+	CMP	R0, #57		; /
+	BEQ	JDOSLA
+	CMP	R0, #107	; G g
+	BEQ	JDOGO
+	CMP	R0, #147
+	BEQ	JDOGO
+	CMP	R0, #122	; R r $ - register designator
+	BEQ	DOREG
+	CMP	R0, #162
+	BEQ	DOREG
+	CMP	R0, #44
+	BEQ	DOREG
+	CMP	R0, #60		; octal digit
+	BLO	JDOERR
+	CMP	R0, #67
+	BHI	DOS		; maybe S for RS/
+	JSR	PC, NCPUTC	; echo
+	MOV	R0, R1
+	SUB	#60, R1
+	TST	RPEND		; after R: the digit picks a register
+	BEQ	DIGACC
+	MOV	R1, REGSEL
+	JMP	MLOOP
+DIGACC:	ASL	ACC		; ACC = ACC*8 + digit
+	ASL	ACC
+	ASL	ACC
+	ADD	R1, ACC
+	INC	DIGSN
+	JMP	MLOOP
+
+JDOCR:	JMP	DOCR
+JDOLF:	JMP	DOLF
+JDOSLA:	JMP	DOSLA
+JDOGO:	JMP	DOGO
+JDOERR:	JMP	DOERR
+
+DOS:	CMP	R0, #123	; S s (only meaningful after R)
+	BEQ	DOS1
+	CMP	R0, #163
+	BNE	JDOERR
+DOS1:	TST	RPEND
+	BEQ	JDOERR
+	JSR	PC, NCPUTC
+	MOV	#10, REGSEL	; slot 8 = PS
+	JMP	MLOOP
+
+DOREG:	JSR	PC, NCPUTC
+	MOV	#1, RPEND
+	MOV	#-1, REGSEL
+	JMP	MLOOP
+
+; ---- open a location -------------------------------------------------
+
+DOSLA:	JSR	PC, NCPUTC
+	TST	RPEND		; Rn/ - a slot in the trap frame
+	BEQ	DOSL1
+	CLR	RPEND
+	MOV	REGSEL, R1
+	BMI	DOERR		; R with no register picked
+	ASL	R1
+	ADD	#SAVREG, R1
+	MOV	R1, OPNADR
+	BR	DOSL2
+DOSL1:	TST	DIGSN		; a bare / opens nothing
+	BEQ	DOERR
+	BIT	#1, ACC		; odd address: ODT would trap, we scold
+	BNE	DOERR
+	MOV	ACC, OPNADR
+DOSL2:	MOV	OPNADR, R1	; examine (an NXM here traps to CATCH -
+	MOV	(R1), R0	; the monitor scolds itself and returns)
+	JSR	PC, POCT
+	MOV	#40, R0
+	JSR	PC, NCPUTC
+	MOV	#1, INOPEN
+	CLR	ACC
+	CLR	DIGSN
+	JMP	MLOOP
+
+; ---- close (CR) / close-and-next (LF) -------------------------------
+
+DOCR:	MOV	#1, LASTCR
+	JSR	PC, DEPOS
+	CLR	INOPEN
+	JSR	PC, CRLF
+	JSR	PC, PRMPT
+	JMP	MLOOP
+
+DOLF:	TST	INOPEN
+	BEQ	DOCR		; LF with nothing open = a prompt
+	JSR	PC, DEPOS
+	ADD	#2, OPNADR
+	JSR	PC, CRLF
+	MOV	OPNADR, R0	; "NNNNNN/VVVVVV " like the real thing
+	JSR	PC, POCT
+	MOV	#57, R0
+	JSR	PC, NCPUTC
+	MOV	OPNADR, R1
+	MOV	(R1), R0
+	JSR	PC, POCT
+	MOV	#40, R0
+	JSR	PC, NCPUTC
+	CLR	ACC
+	CLR	DIGSN
+	JMP	MLOOP
+
+DEPOS:	TST	INOPEN		; deposit ACC if digits were typed
+	BEQ	DEPOS9
+	TST	DIGSN
+	BEQ	DEPOS9
+	MOV	OPNADR, R1
+	MOV	ACC, (R1)
+DEPOS9:	CLR	ACC
+	CLR	DIGSN
+	RTS	PC
+
+; ---- go --------------------------------------------------------------
+
+DOGO:	JSR	PC, NCPUTC
+	TST	DIGSN
+	BEQ	DOERR
+	TST	INOPEN
+	BNE	DOERR
+	JSR	PC, CRLF
+	JSR	PC, NCFLSH	; last words out before handover
+	MOV	ACC, R1
+	CLR	ACC
+	CLR	DIGSN
+	MOV	#340, @#177776	; priority 7 for the payload's first steps
+	MOV	#1000, SP	; the customary stack
+	JMP	(R1)		; vectors still point at CATCH: a crash
+				; lands back at the prompt, frame saved
+
+DOERR:	MOV	#77, R0		; "?"
+	JSR	PC, NCPUTC
+	JSR	PC, CRLF
+	JSR	PC, RESET
+	JSR	PC, PRMPT
+	JMP	MLOOP
+
+; ---- any trap, from the monitor or a launched wreck -----------------
+
+CATCH:	MOV	#340, @#177776
+	MOV	R0, SAVREG	; the machine state, laid out for Rn/
+	MOV	R1, SAVREG+2
+	MOV	R2, SAVREG+4
+	MOV	R3, SAVREG+6
+	MOV	R4, SAVREG+10
+	MOV	R5, SAVREG+12
+	MOV	SP, R1
+	BIT	#1, R1		; only read a sane-looking frame
+	BNE	CATCH1
+	CMP	R1, #170000
+	BHIS	CATCH1
+	MOV	(R1), SAVREG+16	; PC
+	MOV	2(R1), SAVREG+20 ; PS
+	ADD	#4, R1
+	MOV	R1, SAVREG+14	; SP as it was before the trap pushed
+CATCH1:	MOV	#40000, SP	; fresh feet
+	JSR	PC, RESET
+	JSR	PC, CRLF
+	MOV	#41, R0		; "!" + the guilty PC
+	JSR	PC, NCPUTC
+	MOV	SAVREG+16, R0
+	JSR	PC, POCT
+	JSR	PC, CRLF
+	JSR	PC, PRMPT
+	JMP	MLOOP
+
+; ---- session helpers -------------------------------------------------
+
+NEWSES:	JSR	PC, RESET
+	JSR	PC, CRLF
+	MOV	#MBANNR, R1
+	JSR	PC, PUTS
+	JSR	PC, PRMPT
+	RTS	PC
+
+RESET:	CLR	ACC		; parser to ground state
+	CLR	DIGSN
+	CLR	INOPEN
+	CLR	RPEND
+	CLR	LASTCR
+	RTS	PC
+
+PRMPT:	MOV	#76, R0		; ">" - deliberately NOT "@": J11Terminal's
+	JSR	PC, NCPUTC	; register auto-refresh treats an idle
+	RTS	PC		; "@" as ODT and types R0/..RS/ into the
+				; session (seen live, wrecked deposits)
+
+CRLF:	MOV	#15, R0
+	JSR	PC, NCPUTC
+	MOV	#12, R0
+	JSR	PC, NCPUTC
+	RTS	PC
+
+PUTS:	MOVB	(R1)+, R0
+	BEQ	PUTS2
+	MOV	R1, -(SP)
+	JSR	PC, NCPUTC
+	MOV	(SP)+, R1
+	BR	PUTS
+PUTS2:	RTS	PC
+
+; print R0 as six octal digits, through the network console
+
+POCT:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	MOV	R0, R3
+	CLR	R0
+	ROL	R3
+	ROL	R0
+	ADD	#60, R0
+	JSR	PC, NCPUTC
+	MOV	#5, R2
+POCT1:	CLR	R0
+	ROL	R3
+	ROL	R0
+	ROL	R3
+	ROL	R0
+	ROL	R3
+	ROL	R0
+	ADD	#60, R0
+	MOV	R2, -(SP)
+	JSR	PC, NCPUTC
+	MOV	(SP)+, R2
+	SOB	R2, POCT1
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- messages and state ---------------------------------------------
+
+MNONET:	.ASCII	/NO NET - SERIAL ONLY/
+	.BYTE	15, 12, 0
+MBANNR:	.ASCII	/DCJ-11 NETMON/
+	.BYTE	15, 12, 0
+
+	.EVEN
+ACC:	.WORD	0		; octal accumulator
+DIGSN:	.WORD	0		; digits typed since last state change
+INOPEN:	.WORD	0		; a location is open
+OPNADR:	.WORD	0		; which one
+RPEND:	.WORD	0		; R seen, register number pending
+REGSEL:	.WORD	0		; picked register (10 = PS)
+LASTCR:	.WORD	0		; swallow the LF of a CRLF
+SAVREG:	.BLKW	^D9		; R0-R5, SP, PC, PS - filled by CATCH
+
+	.INCLUDE "netcon.mac"
+	.INCLUDE "w5500.mac"
+	.INCLUDE "../spi/spi.mac"
+
+	.END	START

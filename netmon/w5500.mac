@@ -1,0 +1,258 @@
+; w5500.mac — WIZnet W5500 register access over spi.mac
+;
+; Every SPI frame is: address high byte, address low byte, control byte,
+; then data. Control byte = block<<3 | write<<2 | mode; mode 00 is the
+; variable-length data mode, where the frame simply ends when CS rises —
+; which is exactly how spi.mac frames transactions. The address auto-
+; increments inside one frame, so multi-byte registers go in one burst.
+;
+; Only the common register block (block 0) is used here. Its registers,
+; octal (datasheet is in hex):
+;	MR	0	mode
+;	GAR	1-4	gateway address
+;	SUBR	5-10	subnet mask
+;	SHAR	11-16	station MAC
+;	SIPR	17-22	source IP
+;	PHYCFG	56	PHY status/config - bit 0 = LNK (link up)
+;	VERSIO	71	chip version - ALWAYS reads 4
+;
+; API:
+;	W5RST	hardware reset pulse + settle (uses the PB4 RESET line)
+;	W5RD	R0 = address -> R0 = byte		(preserves R2-R5)
+;	W5WR	R0 = address, R1 = byte			(preserves R2-R5)
+;	W5RDN	R0 = address, R1 = buffer, R2 = count	(clobbers R0-R1)
+;	W5WRN	R0 = address, R1 = buffer, R2 = count	(clobbers R0-R1)
+;
+; Electrical note: the W5500 is NOT 5 V tolerant. SCS/RST/MOSI/SCLK from
+; the 5 V VIA need level dropping (1k8/3k3 dividers are fine at bit-bang
+; speed); MISO (3.3 V out) is read directly, as proven on this board.
+
+VERSIO	= 71			; version register (reads 4)
+PHYCFG	= 56			; PHY config/status
+W5MR	= 0
+W5GAR	= 1
+W5SUBR	= 5
+W5SHAR	= 11
+W5SIPR	= 17
+
+; socket 0 register block (BSB 1), offsets octal:
+S0MR	= 0			; mode: 2 = UDP
+S0CR	= 1			; command
+S0IR	= 2			; interrupt flags (write 1s to clear)
+S0SR	= 3			; status: 042 = SOCK_UDP
+S0PORT	= 4			; source port, big-endian word
+S0DIPR	= 14			; destination IP (4 bytes)
+S0DPOR	= 20			; destination port, big-endian word
+S0TXWR	= 44			; TX write pointer
+S0RXRS	= 46			; RX received size
+S0RXRD	= 50			; RX read pointer
+
+CROPEN	= 1			; S0CR commands
+CRSEND	= 40
+CRRECV	= 100
+SUDP	= 042			; S0SR: socket open in UDP mode
+SENDOK	= 20			; S0IR: SEND completed
+
+; control bytes: block<<3 | write<<2 (mode 00 = variable length)
+CSREG	= 10			; socket 0 registers, read
+CSREGW	= 14			; socket 0 registers, write
+CSTXW	= 24			; socket 0 TX buffer, write
+CSRXR	= 30			; socket 0 RX buffer, read
+
+; ---- hardware reset --------------------------------------------------
+
+W5RST:	MOV	R0, -(SP)
+	JSR	PC, SPIRSL
+	MOV	#2, R0		; >=500 ns required; ~2 ms is free
+	JSR	PC, W5DLY
+	JSR	PC, SPIRSH
+	MOV	#5, R0		; PLL/PHY settle after reset
+	JSR	PC, W5DLY
+	MOV	(SP)+, R0
+	RTS	PC
+
+; ---- ~1 ms * R0 busy delay ------------------------------------------
+
+W5DLY:	MOV	R1, -(SP)
+W5DLY1:	MOV	#^D3800, R1
+W5DLY2:	SOB	R1, W5DLY2
+	DEC	R0
+	BNE	W5DLY1
+	MOV	(SP)+, R1
+	RTS	PC
+
+; ---- open a frame (internal): R0 = address, R1 = control byte -------
+
+W5FRM:	MOV	R2, -(SP)
+	MOV	R0, R2
+	JSR	PC, SPICSL
+	MOV	R2, R0
+	SWAB	R0
+	BIC	#177400, R0	; address high
+	JSR	PC, SPIXFR
+	MOV	R2, R0
+	BIC	#177400, R0	; address low
+	JSR	PC, SPIXFR
+	MOV	R1, R0		; control
+	JSR	PC, SPIXFR
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- read one byte: R0 = address -> R0 ------------------------------
+
+W5RD:	MOV	R1, -(SP)
+	CLR	R1		; control 0: common block, read
+	JSR	PC, W5FRM
+	CLR	R0
+	JSR	PC, SPIXFR
+	JSR	PC, SPICSH
+	MOV	(SP)+, R1
+	RTS	PC
+
+; ---- write one byte: R0 = address, R1 = value -----------------------
+
+W5WR:	MOV	R1, -(SP)
+	MOV	#4, R1		; control 4: common block, write
+	JSR	PC, W5FRM
+	MOV	(SP), R0
+	BIC	#177400, R0
+	JSR	PC, SPIXFR
+	JSR	PC, SPICSH
+	MOV	(SP)+, R1
+	RTS	PC
+
+; ---- burst read: R0 = address, R1 = buffer, R2 = count --------------
+
+W5RDN:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	MOV	R1, R3
+	CLR	R1
+	JSR	PC, W5FRM
+W5RDN1:	CLR	R0
+	JSR	PC, SPIXFR
+	MOVB	R0, (R3)+
+	SOB	R2, W5RDN1
+	JSR	PC, SPICSH
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- burst write: R0 = address, R1 = buffer, R2 = count -------------
+
+W5WRN:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	MOV	R1, R3
+	MOV	#4, R1
+	JSR	PC, W5FRM
+W5WRN1:	CLR	R0
+	BISB	(R3)+, R0
+	JSR	PC, SPIXFR
+	SOB	R2, W5WRN1
+	JSR	PC, SPICSH
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ==== socket 0 ========================================================
+; Same shapes as above, aimed at the socket-0 register block and its
+; TX/RX buffers. The 16-bit routines handle the chip's big-endian
+; register pairs in one auto-incrementing frame.
+
+; ---- socket register byte: read R0 -> R0 / write R0, R1 -------------
+
+W5SRD:	MOV	R1, -(SP)
+	MOV	#CSREG, R1
+	JSR	PC, W5FRM
+	CLR	R0
+	JSR	PC, SPIXFR
+	JSR	PC, SPICSH
+	MOV	(SP)+, R1
+	RTS	PC
+
+W5SWR:	MOV	R1, -(SP)
+	MOV	#CSREGW, R1
+	JSR	PC, W5FRM
+	MOV	(SP), R0
+	BIC	#177400, R0
+	JSR	PC, SPIXFR
+	JSR	PC, SPICSH
+	MOV	(SP)+, R1
+	RTS	PC
+
+; ---- socket register word (big-endian pair): R0 = addr <-> R0/R1 ----
+
+W5SRDW:	MOV	R1, -(SP)
+	MOV	#CSREG, R1
+	JSR	PC, W5FRM
+	CLR	R0
+	JSR	PC, SPIXFR
+	SWAB	R0		; high byte
+	MOV	R0, R1
+	CLR	R0
+	JSR	PC, SPIXFR
+	BIS	R1, R0
+	JSR	PC, SPICSH
+	MOV	(SP)+, R1
+	RTS	PC
+
+W5SWRW:	MOV	R1, -(SP)	; R0 = addr, R1 = 16-bit value
+	MOV	#CSREGW, R1
+	JSR	PC, W5FRM
+	MOV	(SP), R0
+	SWAB	R0
+	BIC	#177400, R0	; high byte first
+	JSR	PC, SPIXFR
+	MOV	(SP), R0
+	BIC	#177400, R0
+	JSR	PC, SPIXFR
+	JSR	PC, SPICSH
+	MOV	(SP)+, R1
+	RTS	PC
+
+; ---- socket register burst write: R0 = addr, R1 = buf, R2 = count ---
+
+W5SWRN:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	MOV	R1, R3
+	MOV	#CSREGW, R1
+	JSR	PC, W5FRM
+W5SWN1:	CLR	R0
+	BISB	(R3)+, R0
+	JSR	PC, SPIXFR
+	SOB	R2, W5SWN1
+	JSR	PC, SPICSH
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- RX buffer read / TX buffer write: R0 = addr, R1 = buf, R2 = n --
+; The 16-bit pointer is used as-is: the chip wraps it into the 2 KB
+; circular buffer itself (a W5500 nicety the W5100 lacked).
+
+W5RXRD:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	MOV	R1, R3
+	MOV	#CSRXR, R1
+	JSR	PC, W5FRM
+W5RXR1:	CLR	R0
+	JSR	PC, SPIXFR
+	MOVB	R0, (R3)+
+	SOB	R2, W5RXR1
+	JSR	PC, SPICSH
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+W5TXWR:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	MOV	R1, R3
+	MOV	#CSTXW, R1
+	JSR	PC, W5FRM
+W5TXW1:	CLR	R0
+	BISB	(R3)+, R0
+	JSR	PC, SPIXFR
+	SOB	R2, W5TXW1
+	JSR	PC, SPICSH
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
