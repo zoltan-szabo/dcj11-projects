@@ -1,0 +1,18 @@
+{
+  "build" : {
+    "autosave" : true,
+    "lstPageBreaks" : false,
+    "makeLst" : true,
+    "makeSym" : true,
+    "outputDir" : "."
+  },
+  "files" : [
+    "w5test.mac",
+    "w5500.mac",
+    "../spi/spi.mac"
+  ],
+  "main" : "w5test.mac",
+  "name" : "w5test",
+  "origin" : "1000",
+  "schema" : 1
+}

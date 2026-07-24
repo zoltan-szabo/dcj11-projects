@@ -3,6 +3,107 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## net: W5500 — the PDP-11 answers ping; ENC28J60 convicted (2026-07-24)
+
+Plot twist resolved by a second witness. A W5500 module went onto the
+SAME five wires and dividers-less MISO as the ENC28J60 (PB3 CS, PB4
+RSTn, PB5 MOSI, PB6 SCLK, PB7 MISO — VIA→chip lines through 3.3 V
+dividers, W5500 is not 5 V tolerant) and read clean on the first try:
+VER 000004, no rotate. The ROL1 gremlin is therefore NOT the wiring —
+it is the ENC28J60 module itself (input stage or clone silicon counting
+an extra edge). The scope experiment is now optional curiosity, not a
+blocker; the ENC28J60 goes back in the drawer with its chapter below.
+
+`w5500.mac` (frame = addr-hi, addr-lo, control, data over SPIXFR;
+W5RD/W5WR + burst W5RDN/W5WRN, hardware reset) and `w5test.mac`
+(ladder: VERSIONR — with a built-in 000010-means-rotated detector —
+link wait on PHYCFGR, then MAC/IP/mask/gw config with readback verify)
+ran the whole ladder first attempt:
+
+	VER 000004 / LINK UP / IP SET - PING 10.1.0.199
+
+and from the Mac: 4/4 replies, ~2 ms RTT, ARP shows 02:dc:11:0:1:99.
+The silicon answers ARP and ICMP itself — zero protocol code on the
+J-11. Config: 10.1.0.199/24 gw 10.1.0.1, spi.mac still in ~5 kHz
+diagnostic slow mode (remove SPIDLY for speed; W5500 has no minimum).
+
+Next rungs: UDP echo (socket 0, nc -u), then TCP LISTEN port 23 — a
+telnet-able PDP-11 with the chip doing the TCP state machine.
+
+## net: ENC28J60 Ethernet, SPI bring-up — the rotate mystery (2026-07-22, OPEN)
+
+The plan: bit-banged SPI on VIA port B (CS=PB3, RESET=PB4, MOSI=PB5,
+SCK=PB6, MISO=PB7 — coexists with I2C on PB0/1 and SQW on PB2), an
+ENC28J60 driver, then a from-scratch TCP/IP stack. Static 10.1.0.199/24,
+gw 10.1.0.1, MAC 02:DC:11:00:01:99. First milestone: answer a ping.
+Deliberately the hard road — a W5500 would do TCP in silicon; the point
+is to own the stack ("have it in the software stack").
+
+Built so far: `spi/spi.mac` (mode 0, MSB first, ~150 lines in the
+i2c.mac mold), `net/enc.mac` (banked register access with cached bank
+select, MAC/MII dummy-byte handling, PHY via MII, errata-aware init:
+hardware reset instead of SRC, RX buffer at 0, ERXRDPT kept odd,
+HDLDIS), `net/nettest.mac` (bring-up ladder: EREVID → PHY ID → link,
+with an SPI loopback echo and, on failure, ESTAT dump + write/readback
+diagnostics through ERDPTL).
+
+What the hardware says (module: HR911105A-jack board, chip alive, link
+LEDs up): every SPI READ comes back **rotated left by one bit** —
+WR 125 RD 252, WR 63 RD 146, and the tell-tale WR 377 RD 377 (a plain
+shift would give 376; the MSB wraps around to bit 0). ESTAT reads 002 =
+ROL1(001 = CLKRDY): the chip was ready all along. Writes land correctly
+(the readback correlation proves it); only the read path rotates.
+
+Ruled out, with evidence:
+- MISO level margin (3.3 V into 5 V VIA): chip-driven 1-bits read fine.
+- Sampling phase: sample-during-high and sample-before-rise give
+  IDENTICAL results (fix verified in RAM by fingerprint word — 3742/
+  032737 — after a stale-tab detour, see below). So SO is stable across
+  the clock phases; the misalignment is a whole clock, not a phase.
+- Settle time: a ~5 kHz slow build (SPIDLY on every edge) changes
+  nothing. NOTE the trap I fell into: this does NOT acquit signal
+  integrity — each edge is still a full-speed 5 V CMOS transition, so
+  edge-local ringing/crosstalk survives any slowdown.
+
+Current best theory: ONE extra perceived rising edge per transaction,
+byte-consistently placed — the signature of a crosstalk blip on SCK
+fired by the CS falling edge (adjacent jumper wires), or ring-back on
+the SCK edge itself. The wrap bit (last sample = b7 again) suggests the
+chip repeats the data byte when clocked past 16, consistent with it
+running one clock ahead of us.
+
+NEXT, when the bench reopens (two experiments, in order):
+1. Scope SCK at the module pin: trigger on CS falling (look for a blip
+   on SCK), then on SCK rising (look for a double-crossing ring-back).
+   Cure if seen: ~100 ohm series in SCK (and CS) at the VIA end, SCK
+   twisted with its own ground return, wires separated/shortened.
+2. The definitive logic-level test: a HAND-CLOCKED RCR-ESTAT transaction
+   from ODT (DDRB=170, ORB deposits: 030 idle, 020 CS-low, per bit
+   020/120/020 for 0 and 060/160/060 for 1, opcode 0,0,0,1,1,1,0,1;
+   then 8x read-ORB-then-120/020, CS back to 030). Correct chip: bit 7
+   of the reads = 0 seven times then 1 (ESTAT=001). Rotate at hand
+   speed = the chip/protocol; correct at hand speed = electrical.
+
+Workflow lesson (cost three test cycles): editing sources outside a
+running J11Terminal is treacherous — open tabs win over disk at
+assemble AND at upload (the popup sends tab text; even "Open .oct
+File..." returns an already-open stale tab). Remedy used: stage builds
+under a fresh filename (nettest2/3.oct) and verify a fingerprint word
+in RAM via ODT before trusting a run. App-side fix worth doing: watch
+for external file changes and offer reload.
+
+Also latent, found by inspection while debugging: BIS/BIC on ORB are
+read-modify-write — they read the PINS and write back the latch, so
+SPI traffic silently sets the ORB bits of the idle-high I2C lines
+(PB0/1). Harmless for SPI, but i2c.mac depends on ORB bits 0/1 staying
+0 ("output means drive low") — the first I2C transaction after SPI use
+would drive SDA/SCL HIGH instead of low. Fix before mixing the two on
+one boot: re-BIC the I2C bits in I2CINI (already done there — I2CINI
+clears them — so calling I2CINI after SPI use suffices; note it in the
+app code that mixes them).
+
+Status: nothing committed yet; spi/ + net/ exist as files only.
+
 ## eeboot: boot-from-EEPROM experiment, shelved (2026-07-16..17)
 
 The goal: power the machine on and have it run a program with no PC

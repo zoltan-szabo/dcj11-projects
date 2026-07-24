@@ -1,0 +1,188 @@
+; w5test.mac — W5500 bring-up, rungs 1..3 of the ladder
+;
+;	1. VERSIONR reads 000004	(also the ROL1-gremlin detector:
+;					 000010 = rotated, second witness!)
+;	2. PHYCFGR bit 0 = link up
+;	3. write MAC/IP/mask/gateway, verify by readback - from then on
+;	   THE CHIP ITSELF answers ARP and ping: ping 10.1.0.199
+;
+; Config: IP 10.1.0.199/24, gw 10.1.0.1, MAC 02:DC:11:00:01:99.
+; Wiring: same five lines as the ENC28J60 (PB3 CS, PB4 RSTn, PB5 MOSI,
+; PB6 SCLK, PB7 MISO) - but mind the 3.3 V dividers, see w5500.mac.
+;
+; Assemble:	part of w5test.prj (origin 1000); run with P or 1000G.
+
+.	= 1000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+
+START:	MOV	#340, @#177776	; priority 7
+	MOV	#1000, SP
+	MOV	#MHELLO, R1
+	JSR	PC, PMSG
+
+	JSR	PC, SPIINI
+	JSR	PC, W5RST
+
+	MOV	#VERSIO, R0	; ---- rung 1: version ----
+	JSR	PC, W5RD
+	MOV	R0, R4
+	MOV	#MVER, R1
+	JSR	PC, PMSG
+	MOV	R4, R0
+	JSR	PC, POCT
+	JSR	PC, PCRLF
+	CMP	R4, #4
+	BEQ	VEROK
+	CMP	R4, #10		; 4 rotated left one bit
+	BNE	VERBAD
+	MOV	#MROT, R1	; the ENC28J60 gremlin, on a second chip:
+	JSR	PC, PMSG	; wiring convicted
+	HALT
+VERBAD:	MOV	#MNOSPI, R1
+	JSR	PC, PMSG
+	HALT
+
+VEROK:	MOV	#MWAIT, R1	; ---- rung 2: link ----
+	JSR	PC, PMSG
+	MOV	#^D60, R3	; ~15 s
+LNKW:	MOV	#PHYCFG, R0
+	JSR	PC, W5RD
+	BIT	#1, R0		; LNK
+	BNE	LNKUP
+	MOV	#56, R0		; progress "."
+	JSR	PC, PUTC
+	MOV	#^D250, R0
+	JSR	PC, W5DLY
+	SOB	R3, LNKW
+	MOV	#MNOLNK, R1
+	JSR	PC, PMSG
+	HALT
+
+LNKUP:	JSR	PC, PCRLF
+	MOV	#MLINK, R1
+	JSR	PC, PMSG
+
+	MOV	#W5SHAR, R0	; ---- rung 3: network config ----
+	MOV	#MACADR, R1
+	MOV	#6, R2
+	JSR	PC, W5WRN
+	MOV	#W5SIPR, R0
+	MOV	#IPADR, R1
+	MOV	#4, R2
+	JSR	PC, W5WRN
+	MOV	#W5SUBR, R0
+	MOV	#MASK, R1
+	MOV	#4, R2
+	JSR	PC, W5WRN
+	MOV	#W5GAR, R0
+	MOV	#GWADR, R1
+	MOV	#4, R2
+	JSR	PC, W5WRN
+
+	MOV	#W5SIPR, R0	; verify: read the IP back
+	MOV	#RDBUF, R1
+	MOV	#4, R2
+	JSR	PC, W5RDN
+	MOV	#4, R3
+	MOV	#IPADR, R4
+	MOV	#RDBUF, R5
+VRFY:	CMPB	(R4)+, (R5)+
+	BNE	VBAD
+	SOB	R3, VRFY
+	MOV	#MREADY, R1	; the chip now answers ping by itself
+	JSR	PC, PMSG
+	HALT			; P re-runs everything
+	JMP	START
+
+VBAD:	MOV	#MVBAD, R1	; show what came back
+	JSR	PC, PMSG
+	MOV	#4, R3
+	MOV	#RDBUF, R4
+VBAD1:	CLR	R0
+	BISB	(R4)+, R0
+	JSR	PC, POCT
+	MOV	#40, R0
+	JSR	PC, PUTC
+	SOB	R3, VBAD1
+	JSR	PC, PCRLF
+	HALT
+
+; ---- console ---------------------------------------------------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMSG2
+	JSR	PC, PUTC
+	BR	PMSG
+PMSG2:	RTS	PC
+
+PCRLF:	MOV	#15, R0
+	JSR	PC, PUTC
+	MOV	#12, R0
+	JSR	PC, PUTC
+	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+; print R0 as six octal digits
+
+POCT:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	MOV	R0, R3
+	CLR	R0
+	ROL	R3
+	ROL	R0
+	ADD	#60, R0
+	JSR	PC, PUTC
+	MOV	#5, R2
+POCT1:	CLR	R0
+	ROL	R3
+	ROL	R0
+	ROL	R3
+	ROL	R0
+	ROL	R3
+	ROL	R0
+	ADD	#60, R0
+	JSR	PC, PUTC
+	SOB	R2, POCT1
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- messages and data ----------------------------------------------
+
+MHELLO:	.ASCII	/W5TEST/
+	.BYTE	15, 12, 0
+MVER:	.ASCII	/VER /
+	.BYTE	0
+MROT:	.ASCII	/ROTATED - WIRING GREMLIN CONFIRMED/
+	.BYTE	15, 12, 0
+MNOSPI:	.ASCII	/BUS DEAD - CHECK POWER, DIVIDERS, MISO/
+	.BYTE	15, 12, 0
+MWAIT:	.ASCII	/WAITING FOR LINK /
+	.BYTE	0
+MNOLNK:	.ASCII	/NO LINK - CABLE?/
+	.BYTE	15, 12, 0
+MLINK:	.ASCII	/LINK UP/
+	.BYTE	15, 12, 0
+MREADY:	.ASCII	/IP SET - PING 10.1.0.199/
+	.BYTE	15, 12, 0
+MVBAD:	.ASCII	/READBACK MISMATCH: /
+	.BYTE	0
+
+	.EVEN
+MACADR:	.BYTE	2, 334, 21, 0, 1, 231	; 02:DC:11:00:01:99
+IPADR:	.BYTE	12, 1, 0, 307		; 10.1.0.199
+MASK:	.BYTE	377, 377, 377, 0	; /24
+GWADR:	.BYTE	12, 1, 0, 1		; 10.1.0.1
+RDBUF:	.BLKB	4
+	.EVEN
+
+	.INCLUDE "w5500.mac"
+	.INCLUDE "../spi/spi.mac"
+
+	.END	START
