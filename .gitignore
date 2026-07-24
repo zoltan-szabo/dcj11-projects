@@ -1,3 +1,6 @@
+# Treat .mac files as MACRO-11 / Assembly
+*.mac linguist-language=Assembly
+
 *.oct
 *.bin
 *.lst
