@@ -1,0 +1,250 @@
+; w5udp.mac — rung 4: UDP echo on port 7, packet counter on the VQC10
+;
+; Socket 0 in UDP mode. Each datagram to 10.1.0.199:7 is read out of the
+; chip's RX buffer (the chip prepends peer IP/port + length as an 8-byte
+; header), sent straight back to where it came from, and counted. The
+; VQC10 panel shows "UDP nnnnn"; the console prints one "." per packet
+; ("!" = send timeout, i.e. the peer's ARP went unanswered).
+;
+; Test from the Mac:	nc -u 10.1.0.199 7	(type; lines come back)
+;
+; Datagrams over 512 bytes are dropped (consumed, not echoed). The panel
+; is row-multiplexed, so the main loop runs one VQCSCN pass per poll -
+; the display blinks imperceptibly while a packet is being echoed.
+;
+; Assemble:	part of w5udp.prj (origin 1000); run with P or 1000G.
+
+.	= 1000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+MAXPAY	= ^D512			; largest datagram echoed
+
+START:	MOV	#340, @#177776	; priority 7
+	MOV	#1000, SP
+	MOV	#MHELLO, R1
+	JSR	PC, PMSG
+
+	JSR	PC, SPIINI
+	JSR	PC, W5RST
+
+	MOV	#VERSIO, R0	; sanity gate
+	JSR	PC, W5RD
+	CMP	R0, #4
+	BEQ	VEROK
+	MOV	#MNOSPI, R1
+	JSR	PC, PMSG
+	HALT
+
+VEROK:	MOV	#W5SHAR, R0	; network config (as proven by w5test)
+	MOV	#MACADR, R1
+	MOV	#6, R2
+	JSR	PC, W5WRN
+	MOV	#W5SIPR, R0
+	MOV	#IPADR, R1
+	MOV	#4, R2
+	JSR	PC, W5WRN
+	MOV	#W5SUBR, R0
+	MOV	#MASK, R1
+	MOV	#4, R2
+	JSR	PC, W5WRN
+	MOV	#W5GAR, R0
+	MOV	#GWADR, R1
+	MOV	#4, R2
+	JSR	PC, W5WRN
+
+	MOV	#S0MR, R0	; socket 0: UDP mode, source port 7, open
+	MOV	#2, R1
+	JSR	PC, W5SWR
+	MOV	#S0PORT, R0
+	MOV	#7, R1
+	JSR	PC, W5SWRW
+	MOV	#S0CR, R0
+	MOV	#CROPEN, R1
+	JSR	PC, W5SWR
+	MOV	#^D1000, R3
+SOPEN:	MOV	#S0SR, R0
+	JSR	PC, W5SRD
+	CMP	R0, #SUDP
+	BEQ	SOK
+	SOB	R3, SOPEN
+	MOV	#MNOSOK, R1
+	JSR	PC, PMSG
+	HALT
+
+SOK:	JSR	PC, VQCINI	; panel says hello
+	MOV	#PECHO, R0
+	CLR	R1
+	JSR	PC, VQCSTR
+	MOV	#MREADY, R1
+	JSR	PC, PMSG
+
+; ---- the echo loop ---------------------------------------------------
+
+LOOP:	JSR	PC, VQCSCN	; one scan pass keeps the panel lit
+	MOV	#S0RXRS, R0	; received size - read until two reads
+	JSR	PC, W5SRDW	; agree (it moves while a frame lands)
+	MOV	R0, R4
+	MOV	#S0RXRS, R0
+	JSR	PC, W5SRDW
+	CMP	R0, R4
+	BNE	LOOP
+	TST	R4
+	BEQ	LOOP
+
+	MOV	#S0RXRD, R0	; RD pointer -> R5
+	JSR	PC, W5SRDW
+	MOV	R0, R5
+	MOV	R5, R0		; the chip's 8-byte UDP header
+	MOV	#HDR, R1
+	MOV	#10, R2
+	JSR	PC, W5RXRD
+	CLR	R3		; length, big-endian at HDR+6
+	BISB	HDR+6, R3
+	SWAB	R3
+	BISB	HDR+7, R3
+	TST	R3		; empty or oversized: consume, no echo
+	BEQ	DROP
+	CMP	R3, #MAXPAY
+	BHI	DROP
+
+	MOV	R5, R0		; payload
+	ADD	#10, R0
+	MOV	#PAYBUF, R1
+	MOV	R3, R2
+	JSR	PC, W5RXRD
+	MOV	R5, R1		; hand the buffer back: RD += 8 + len
+	ADD	#10, R1
+	ADD	R3, R1
+	MOV	#S0RXRD, R0
+	JSR	PC, W5SWRW
+	MOV	#S0CR, R0
+	MOV	#CRRECV, R1
+	JSR	PC, W5SWR
+
+	MOV	#S0DIPR, R0	; reply to the sender: the header's
+	MOV	#HDR, R1	; IP+port are DIPR/DPORT's exact layout
+	MOV	#6, R2
+	JSR	PC, W5SWRN
+	MOV	#S0TXWR, R0	; write payload at the TX pointer
+	JSR	PC, W5SRDW
+	MOV	R0, R5
+	MOV	R5, R0
+	MOV	#PAYBUF, R1
+	MOV	R3, R2
+	JSR	PC, W5TXWR
+	MOV	R5, R1		; TXWR += len, then SEND
+	ADD	R3, R1
+	MOV	#S0TXWR, R0
+	JSR	PC, W5SWRW
+	MOV	#S0CR, R0
+	MOV	#CRSEND, R1
+	JSR	PC, W5SWR
+
+	MOV	#^D30000, R3	; wait for SEND_OK (or ARP timeout)
+WSEND:	MOV	#S0IR, R0
+	JSR	PC, W5SRD
+	BIT	#SENDOK, R0
+	BNE	SENT
+	BIT	#10, R0		; TIMEOUT: peer never answered ARP
+	BNE	NOARP
+	SOB	R3, WSEND
+NOARP:	MOV	#S0IR, R0	; clear whatever is set, note it, go on
+	MOV	#30, R1
+	JSR	PC, W5SWR
+	MOV	#41, R0		; "!"
+	JSR	PC, PUTC
+	JMP	LOOP
+
+SENT:	MOV	#S0IR, R0
+	MOV	#SENDOK, R1
+	JSR	PC, W5SWR
+	INC	COUNT
+	JSR	PC, SHOWCT
+	MOV	#56, R0		; "."
+	JSR	PC, PUTC
+	JMP	LOOP
+
+DROP:	MOV	R5, R1		; consume without echoing
+	ADD	#10, R1
+	ADD	R3, R1
+	MOV	#S0RXRD, R0
+	JSR	PC, W5SWRW
+	MOV	#S0CR, R0
+	MOV	#CRRECV, R1
+	JSR	PC, W5SWR
+	JMP	LOOP
+
+; ---- panel: "UDP nnnnn" (count in decimal, digits 3-7) --------------
+; Clobbers R0-R5 (main loop re-fetches everything each pass).
+
+SHOWCT:	MOV	#PUDP, R0
+	CLR	R1
+	JSR	PC, VQCSTR
+	MOV	COUNT, WRK
+	MOV	#DECPWR, R4
+	MOV	#3, R5		; digit position
+SHOW1:	CLR	R0
+SHOW2:	CMP	WRK, (R4)	; one decimal digit by subtraction
+	BLO	SHOW3
+	SUB	(R4), WRK
+	INC	R0
+	BR	SHOW2
+SHOW3:	ADD	#60, R0
+	MOV	R5, R1
+	JSR	PC, VQCPUT	; preserves R1/R4/R5
+	INC	R5
+	TST	(R4)+
+	CMP	R4, #DECEND
+	BLO	SHOW1
+	RTS	PC
+
+DECPWR:	.WORD	^D10000, ^D1000, ^D100, ^D10, 1
+DECEND:
+
+; ---- console ---------------------------------------------------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMSG2
+	JSR	PC, PUTC
+	BR	PMSG
+PMSG2:	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+; ---- messages and data ----------------------------------------------
+
+MHELLO:	.ASCII	/W5UDP/
+	.BYTE	15, 12, 0
+MNOSPI:	.ASCII	/BUS DEAD - CHECK POWER, DIVIDERS, MISO/
+	.BYTE	15, 12, 0
+MNOSOK:	.ASCII	/SOCKET WOULD NOT OPEN/
+	.BYTE	15, 12, 0
+MREADY:	.ASCII	/READY - UDP PORT 7 AT 10.1.0.199/
+	.BYTE	15, 12, 0
+PECHO:	.ASCII	/UDP ECHO/
+	.BYTE	0
+PUDP:	.ASCII	/UDP /
+	.BYTE	0
+
+	.EVEN
+MACADR:	.BYTE	2, 334, 21, 0, 1, 231	; 02:DC:11:00:01:99
+IPADR:	.BYTE	12, 1, 0, 307		; 10.1.0.199
+MASK:	.BYTE	377, 377, 377, 0	; /24
+GWADR:	.BYTE	12, 1, 0, 1		; 10.1.0.1
+	.EVEN
+COUNT:	.WORD	0
+WRK:	.WORD	0
+HDR:	.BLKB	10
+PAYBUF:	.BLKB	MAXPAY
+	.EVEN
+
+	.INCLUDE "w5500.mac"
+	.INCLUDE "../spi/spi.mac"
+	.INCLUDE "../vqc10/vqc10.mac"
+	.INCLUDE "../max7219/font5x7.mac"
+
+	.END	START
