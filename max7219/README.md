@@ -63,7 +63,7 @@ first. If it walks differently, that reveals the true mapping — adjust
 m11asm -b 1000 hello.mac
 ```
 
-paste `hello.oct` into J11Terminal Octal Upload, then `1000G`.
+open `hello.oct` in J11Terminal, Upload to ODT, then `1000G`.
 
 ## Notes
 

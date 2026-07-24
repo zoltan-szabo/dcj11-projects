@@ -15,6 +15,9 @@ MACRO-11 projects for the DCJ-11 SBC and Multi IO card by Peter Schranz
 | `at24c32/` | AT24C32 I2C EEPROM driver (over i2c), plus a write/read-back demo |
 | `vqc10/` | Pure driver for the DisplayVQC10 panel (two VQC10 5x7 LED matrix modules behind 74HC595s), plus a DS3231 clock demo |
 | `eeboot/` | Boot-from-EEPROM experiment: AT24C32 image format + burner work; standalone boot shelved (Multi IO boot ROM issue, see HISTORY) |
+| `spi/` | Software (bit-banged) SPI master on VIA port B (mode 0, MSB first) |
+| `net-discovery/` | The Ethernet bring-up campaign (archived): ENC28J60 (shelved — rotates SPI reads) and W5500, up to a ping-answering, telnet-able PDP-11. See HISTORY |
+| `netmon/` | The living network project: an ODT-style monitor served over a TCP/SLU mirrored console (`telnet 10.1.0.199` / `nc`) — examine/deposit/go, trap CATCH, W5500 |
 
 ## Toolchain
 
@@ -30,8 +33,9 @@ Build an example:
 m11asm -b 1000 hello.mac
 ```
 
-then paste the `.oct` into J11Terminal's Octal Upload and start it with
-`1000G` from the ODT prompt.
+then open the `.oct` (or the project's `.prj`) in J11Terminal, **Upload to
+ODT**, and start it with `1000G` from the ODT prompt (or `P`, since Upload
+sets the PC).
 
 ## Project files
 

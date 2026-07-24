@@ -87,7 +87,7 @@ removed) reconfirmed by w5test first. The reply aiming is free: the
 chip's 8-byte RX header (peer IP, port) has exactly DIPR/DPORT's
 layout, so one 6-byte burst write points the echo home.
 
-## net: ENC28J60 Ethernet, SPI bring-up — the rotate mystery (2026-07-22, OPEN)
+## net: ENC28J60 Ethernet, SPI bring-up — the rotate mystery (2026-07-22, RESOLVED: module fault — see the W5500 chapter above)
 
 The plan: bit-banged SPI on VIA port B (CS=PB3, RESET=PB4, MOSI=PB5,
 SCK=PB6, MISO=PB7 — coexists with I2C on PB0/1 and SQW on PB2), an

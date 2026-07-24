@@ -25,7 +25,7 @@ display on port A.
 m11asm -b 1000 radio-lcd.mac
 ```
 
-paste the `.oct` into J11Terminal Octal Upload, then `1000G`. It reads the
+open the `.oct` in J11Terminal, Upload to ODT, then `1000G`. It reads the
 console UART directly while running (no ODT needed); tune from the Terminal
 view:
 
