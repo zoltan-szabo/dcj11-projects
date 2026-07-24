@@ -43,6 +43,18 @@ inspection. Verified over nc: deposit/verify, LF-walk, crash-examine-
 patch-relaunch. Note netmon's 16-bit addressing: 173000/ there IS the
 boot ROM window (I/O-page top-8KB relocation) — inverse of console ODT.
 
+2026-07-25: netcon learned telnet. A no-port `telnet` invocation (unlike
+`telnet host 23` - BSD telnet only auto-negotiates on the default port,
+which is why the first test looked clean) opened with an option burst
+whose OPTION bytes are small - they sailed through the naive >177
+filter, one "?" per option. netcon now runs a real IAC state machine:
+swallows verb+option triplets and SB..SE blocks, refuses every request
+(DO->WONT, WILL->DONT), and - only once a caller reveals itself by
+sending IAC - offers WILL SGA + WILL ECHO, flipping telnet into
+character mode with remote echo: examine answers at the '/', no Enter
+needed. nc never sends IAC, so raw sessions never see a protocol byte
+(verified both ways over the wire).
+
 Three live findings during bring-up, each worth remembering:
 - A tight poll loop catches TCP transients (SYN_RECV mid-handshake);
   treating them as dead and reopening RSTs the caller. Only SOCK_CLOSED

@@ -45,6 +45,7 @@ NCINI:	CLR	NCST		; clean slate (matters after a G restart)
 	CLR	TXLEN
 	CLR	RXHD
 	CLR	RXTL
+	CLR	IACST
 	JSR	PC, SPIINI
 	JSR	PC, W5RST
 	MOV	#VERSIO, R0
@@ -123,6 +124,8 @@ NCPES:	TST	NCST		; established - new caller?
 	MOV	#1, NCST
 	MOV	#1, NCNEW
 	CLR	TXLEN		; stale output belonged to nobody
+	CLR	IACST		; fresh telnet state per caller
+	CLR	OFRSNT
 NCPDR:	MOV	#S0RXRS, R0	; two agreeing size reads
 	JSR	PC, W5SRDW
 	MOV	R0, R2
@@ -157,13 +160,118 @@ NCPD2:	MOV	#S0RXRD, R0
 	MOV	#S0CR, R0
 	MOV	#CRRECV, R1
 	JSR	PC, W5SWR
-	MOV	#NCTMP, R3	; into the ring
-NCPD3:	MOV	RXHD, R1
-	MOVB	(R3)+, RXRING(R1)
+	MOV	#NCTMP, R3	; into the ring, through the telnet filter
+NCPD3:	MOVB	(R3)+, R0
+	BIC	#177400, R0
+	JSR	PC, NCFILT
+	SOB	R2, NCPD3
+	RTS	PC
+
+; ---- telnet IAC filter -----------------------------------------------
+; On the default port a telnet client negotiates immediately (IAC verb
+; option triplets, SB..SE blocks). Swallow them all and REFUSE every
+; request (DO x -> WONT x, WILL x -> DONT x, socket-only - the SLU
+; never sees protocol bytes) so the client settles into plain mode.
+; Naive >177 filtering leaks the option byte (it is small) - seen live
+; as a "?" per offered option. Preserves R2/R3 for the drain loop.
+
+NCFILT:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	JSR	PC, NCFIL0
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+NCFIL0:	TST	IACST
+	BNE	NCFI2
+	CMP	R0, #377	; IAC opens a sequence
+	BNE	NCFI1
+	MOV	#1, IACST
+	TST	OFRSNT		; first IAC = a real telnet client: offer
+	BNE	NCFI0A		; WILL SGA + WILL ECHO once, which flips
+	MOV	#1, OFRSNT	; it into character mode with remote echo
+	MOV	#377, R0	; (nc never sends IAC, so raw sessions
+	JSR	PC, NCTXB	; never see these bytes)
+	MOV	#373, R0
+	JSR	PC, NCTXB
+	MOV	#3, R0		; SGA
+	JSR	PC, NCTXB
+	MOV	#377, R0
+	JSR	PC, NCTXB
+	MOV	#373, R0
+	JSR	PC, NCTXB
+	MOV	#1, R0		; ECHO
+	JSR	PC, NCTXB
+NCFI0A:	RTS	PC
+NCFI1:	MOV	RXHD, R1	; ordinary byte: into the ring
+	MOVB	R0, RXRING(R1)
 	INC	R1
 	BIC	#177400, R1
 	MOV	R1, RXHD
-	SOB	R2, NCPD3
+	RTS	PC
+NCFI2:	CMP	IACST, #1	; byte after IAC: the verb
+	BNE	NCFI4
+	CMP	R0, #372	; SB: skip until IAC SE
+	BNE	NCFI3
+	MOV	#3, IACST
+	RTS	PC
+NCFI3:	CMP	R0, #373	; WILL/WONT/DO/DONT carry an option byte
+	BLO	NCFI3A
+	MOV	R0, IACCMD
+	MOV	#2, IACST
+	RTS	PC
+NCFI3A:	CLR	IACST	; NOP/GA/EOR-class: two bytes, done
+	RTS	PC
+NCFI4:	CMP	IACST, #2	; the option byte - answer the request
+	BNE	NCFI6
+	CLR	IACST
+	MOV	R0, -(SP)
+	CMP	IACCMD, #375	; DO -> WONT (except our own offers)
+	BEQ	NCFI4A
+	CMP	IACCMD, #373	; WILL -> DONT
+	BEQ	NCFI4B
+	TST	(SP)+		; WONT/DONT are refusals: no reply
+	RTS	PC
+NCFI4A:	CMP	(SP), #1	; DO ECHO / DO SGA accept our WILLs -
+	BEQ	NCFI4C		; already granted, no reply
+	CMP	(SP), #3
+	BEQ	NCFI4C
+	MOV	#374, R1
+	BR	NCFI5
+NCFI4C:	TST	(SP)+
+	RTS	PC
+NCFI4B:	MOV	#376, R1
+NCFI5:	MOV	R1, -(SP)
+	MOV	#377, R0	; IAC refusal option
+	JSR	PC, NCTXB
+	MOV	(SP)+, R0
+	JSR	PC, NCTXB
+	MOV	(SP)+, R0
+	JSR	PC, NCTXB
+	RTS	PC
+NCFI6:	CMP	IACST, #3	; inside SB: hunt for IAC
+	BNE	NCFI7
+	CMP	R0, #377
+	BNE	NCFI9
+	MOV	#4, IACST
+	RTS	PC
+NCFI7:	CMP	R0, #360	; IAC inside SB: SE ends the block
+	BEQ	NCFI8
+	MOV	#3, IACST	; anything else: still inside
+	RTS	PC
+NCFI8:	CLR	IACST
+NCFI9:	RTS	PC
+
+; ---- append R0 to the socket TX buffer only (no SLU) ----------------
+
+NCTXB:	MOV	R0, -(SP)
+	CMP	TXLEN, #100
+	BLO	NCTX1
+	JSR	PC, NCFLSH
+NCTX1:	MOV	TXLEN, R1
+	MOV	(SP)+, R0
+	MOVB	R0, TXBUF(R1)
+	INC	TXLEN
 	RTS	PC
 
 ; ---- poll one character: R0 = char, or -1 ---------------------------
@@ -249,6 +357,9 @@ NCNEW:	.WORD	0		; fresh-connection flag for the caller
 TXLEN:	.WORD	0
 RXHD:	.WORD	0
 RXTL:	.WORD	0
+IACST:	.WORD	0		; telnet filter state
+IACCMD:	.WORD	0		; pending WILL/WONT/DO/DONT verb
+OFRSNT:	.WORD	0		; char-mode offer sent to this caller
 TXBUF:	.BLKB	102
 RXRING:	.BLKB	400
 NCTMP:	.BLKB	100
