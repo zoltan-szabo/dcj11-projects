@@ -30,6 +30,15 @@ diagnostic slow mode (remove SPIDLY for speed; W5500 has no minimum).
 Next rungs: UDP echo (socket 0, nc -u), then TCP LISTEN port 23 — a
 telnet-able PDP-11 with the chip doing the TCP state machine.
 
+Same day, rung 4 verified on hardware: `w5udp.mac` echoes UDP on port
+7 with the packet count live on the VQC10 panel ("UDP nnnnn") — 50/50
+packets byte-correct at ~40 ms RTT (latency = the VQCSCN scan pass per
+poll, ~20 ms each: the display sets the pace), a 400-byte payload
+byte-exact, 600-byte correctly dropped. Full-speed spi.mac (SPIDLY
+removed) reconfirmed by w5test first. The reply aiming is free: the
+chip's 8-byte RX header (peer IP, port) has exactly DIPR/DPORT's
+layout, so one 6-byte burst write points the echo home.
+
 ## net: ENC28J60 Ethernet, SPI bring-up — the rotate mystery (2026-07-22, OPEN)
 
 The plan: bit-banged SPI on VIA port B (CS=PB3, RESET=PB4, MOSI=PB5,
