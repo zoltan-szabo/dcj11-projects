@@ -1,0 +1,79 @@
+; spi.mac — software (bit-banged) SPI master for the DCJ-11
+;
+; SPI mode 0 (clock idles low, slave latches MOSI on the rising edge,
+; master samples MISO while the clock is high), MSB first, on the W65C22S
+; VIA port B. The lines are push-pull, so unlike i2c.mac the pins are set
+; up as outputs once and stay that way. Only PB3-PB7 are touched: PB0-PB2
+; (I2C SDA/SCL and the DS3231 SQW input) are left alone, so the network
+; and the clock hardware can share the port.
+;
+; Wiring (Multi IO card, port B -> ENC28J60 module):
+;	CS    - PB3	chip select, active low
+;	RESET - PB4	hardware reset, active low
+;	MOSI  - PB5	-> module SI
+;	SCK   - PB6
+;	MISO  - PB7	<- module SO (3.3 V output into a 5 V VIA - if reads
+;			   come back 000/377, suspect this margin first)
+;
+; API:
+;	SPIINI	set up the port: CS/RESET high, SCK low; call once
+;	SPICSL	assert CS (low)		SPICSH	release CS (high)
+;	SPIRSL	assert RESET (low)	SPIRSH	release RESET (high)
+;	SPIXFR	R0 = byte to send; returns R0 = byte received
+;
+; SPIXFR preserves R2-R5. No settle delays: the VIA bus access time alone
+; keeps SCK far below the ENC28J60's 20 MHz ceiling, and SPI has no lower
+; speed limit (it is a static bus).
+
+SPIORB	= 174000		; VIA ORB/IRB - port B data
+SPIDRB	= 174004		; VIA DDRB - direction, 1 = output
+
+SPCS	= 010			; PB3
+SPRST	= 020			; PB4
+SPMOSI	= 040			; PB5
+SPSCK	= 100			; PB6
+SPMISO	= 200			; PB7
+
+; ---- port setup ------------------------------------------------------
+
+SPIINI:	BIS	#SPCS!SPRST, @#SPIORB	; deselected, not in reset
+	BIC	#SPMOSI!SPSCK, @#SPIORB	; clock idles low
+	BIS	#SPCS!SPRST!SPMOSI!SPSCK, @#SPIDRB
+	BIC	#SPMISO, @#SPIDRB	; MISO is the one input
+	RTS	PC
+
+; ---- select / reset lines -------------------------------------------
+
+SPICSL:	BIC	#SPCS, @#SPIORB
+	RTS	PC
+SPICSH:	BIS	#SPCS, @#SPIORB
+	RTS	PC
+SPIRSL:	BIC	#SPRST, @#SPIORB
+	RTS	PC
+SPIRSH:	BIS	#SPRST, @#SPIORB
+	RTS	PC
+
+; ---- exchange one byte: R0 out -> R0 in, MSB first ------------------
+
+SPIXFR:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	CLR	R3		; received byte assembles here
+	MOV	#^D8, R2
+SPIX1:	ASL	R3
+	BIT	#200, R0	; current MSB onto MOSI
+	BEQ	SPIX2
+	BIS	#SPMOSI, @#SPIORB
+	BR	SPIX3
+SPIX2:	BIC	#SPMOSI, @#SPIORB
+SPIX3:	BIT	#SPMISO, @#SPIORB	; sample SO just before the rising
+	BEQ	SPIX4			; edge (robust on the W5500; the old
+	INC	R3			; ENC28J60 module rotated reads at
+					; ANY speed/phase - see HISTORY)
+SPIX4:	BIS	#SPSCK, @#SPIORB	; rising edge - slave latches MOSI
+	BIC	#SPSCK, @#SPIORB	; falling edge
+	ASL	R0
+	SOB	R2, SPIX1
+	MOV	R3, R0
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
