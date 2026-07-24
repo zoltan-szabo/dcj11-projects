@@ -1,0 +1,19 @@
+{
+  "build" : {
+    "autosave" : true,
+    "lstPageBreaks" : false,
+    "makeLst" : true,
+    "makeSym" : true,
+    "outputDir" : "."
+  },
+  "files" : [
+    "netmon.mac",
+    "netcon.mac",
+    "w5500.mac",
+    "../spi/spi.mac"
+  ],
+  "main" : "netmon.mac",
+  "name" : "netmon",
+  "origin" : "40000",
+  "schema" : 1
+}

@@ -30,6 +30,31 @@ diagnostic slow mode (remove SPIDLY for speed; W5500 has no minimum).
 Next rungs: UDP echo (socket 0, nc -u), then TCP LISTEN port 23 — a
 telnet-able PDP-11 with the chip doing the TCP state machine.
 
+2026-07-24 evening: `netcon.mac` + `netmon.mac` — the network console
+and the monitor on top of it. netcon mirrors a TCP caller (port 23)
+with the SLU: NCPUTC hits both, NCPOLC reads whichever has a byte,
+output is line-buffered toward the socket, and the pump tends the
+connection (accept, FIN, re-listen; SLU-only if no W5500). netmon is
+an ODT-grammar monitor at 40000 (payloads keep 1000): NNNNNN/ examine,
+value CR deposit, LF close-and-next, Rn//RS/ read the trap frame, G
+launches at PRI 7 — and CATCH owns every vector, so a crashed payload
+prints !PC and hands the prompt back with its registers laid out for
+inspection. Verified over nc: deposit/verify, LF-walk, crash-examine-
+patch-relaunch. Note netmon's 16-bit addressing: 173000/ there IS the
+boot ROM window (I/O-page top-8KB relocation) — inverse of console ODT.
+
+Three live findings during bring-up, each worth remembering:
+- A tight poll loop catches TCP transients (SYN_RECV mid-handshake);
+  treating them as dead and reopening RSTs the caller. Only SOCK_CLOSED
+  warrants a reopen. w5tcp never saw this - its 20 ms VQCSCN pass made
+  transients invisible. Latency hid the bug; speed exposed it.
+- J11Terminal's register auto-refresh types R0/..RS/ at anything that
+  prompts "@" and goes idle - with netmon on the SLU it was a third
+  participant silently wrecking open locations. netmon prompts ">" now;
+  a software monitor must not impersonate microcode ODT to the tools.
+- 000007 is not an illegal instruction on a DCJ-11 - it is MFPT. For a
+  deterministic crash test, deposit TRAP (104400): !PC = site + 2.
+
 Rung 5 same day: `w5tcp.mac` — TCP listener on port 23. The greeting
 line reads the DS3231 over I2C at connect time ("DCJ-11 SBC READY -
 HH:MM:SS", live: a reconnect two seconds later showed the clock two
