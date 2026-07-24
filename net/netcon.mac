@@ -1,0 +1,260 @@
+; netcon.mac — network console: TCP port 23 mirrored with the SLU
+;
+; A console I/O layer with two faces. Output goes to the physical
+; console (SLU) always and to a connected TCP caller as well; input is
+; taken from whichever source has a character. A program written
+; against NCPUTC/NCPOLC is interactive on the serial console, over
+; telnet/nc, or both at once.
+;
+; Output is buffered (64 bytes) toward the socket and pushed by NCFLSH,
+; so a printed line travels as one TCP segment, not thirty. Input from
+; the socket is drained into a 256-byte ring by NCPUMP, which also
+; tends the connection: accepts a caller, answers a FIN, re-listens.
+; One caller at a time.
+;
+; API (NCPOLC/NCPUTC/NCFLSH clobber R0-R3; R4/R5 preserved):
+;	NCINI	full bring-up: SPI, W5500 reset+config, listen on 23.
+;		R0 = 0 ok / 1 = no chip (layer then works SLU-only)
+;	NCPOLC	poll one char -> R0, or R0 = -1 if none (pumps the net)
+;	NCPUTC	R0 = char: SLU immediately + socket buffer
+;	NCFLSH	send the socket buffer (drops it if nobody connected)
+;	NCNEW	word, set to 1 on a fresh connection - caller checks
+;		and clears (greet the caller, reset session state)
+;
+; Network identity lives here: NCMAC/NCIP/NCMASK/NCGW below.
+
+RCSR	= 177560		; console receive status (bit 7 = ready)
+RBUF	= 177562
+XCSR	= 177564		; console transmit status
+XBUF	= 177566
+
+; socket 0 TCP states / commands (see w5500.mac for the registers)
+SINIT	= 023
+SLISTN	= 024
+SESTAB	= 027
+SCLOSW	= 034
+CRLIST	= 2
+CRDISC	= 10
+CRCLOS	= 20
+NCPORT	= 27			; TCP port 23.
+
+; ---- bring-up --------------------------------------------------------
+
+NCINI:	CLR	NCST		; clean slate (matters after a G restart)
+	CLR	NCNEW
+	CLR	TXLEN
+	CLR	RXHD
+	CLR	RXTL
+	JSR	PC, SPIINI
+	JSR	PC, W5RST
+	MOV	#VERSIO, R0
+	JSR	PC, W5RD
+	CMP	R0, #4
+	BEQ	NCINI1
+	MOV	#1, R0		; no chip - SLU-only operation
+	RTS	PC
+NCINI1:	MOV	#W5SHAR, R0
+	MOV	#NCMAC, R1
+	MOV	#6, R2
+	JSR	PC, W5WRN
+	MOV	#W5SIPR, R0
+	MOV	#NCIP, R1
+	MOV	#4, R2
+	JSR	PC, W5WRN
+	MOV	#W5SUBR, R0
+	MOV	#NCMASK, R1
+	MOV	#4, R2
+	JSR	PC, W5WRN
+	MOV	#W5GAR, R0
+	MOV	#NCGW, R1
+	MOV	#4, R2
+	JSR	PC, W5WRN
+	JSR	PC, NCOPEN
+	CLR	R0
+	RTS	PC
+
+; ---- (re)open the listener ------------------------------------------
+
+NCOPEN:	MOV	#S0CR, R0
+	MOV	#CRCLOS, R1
+	JSR	PC, W5SWR
+	MOV	#S0MR, R0
+	MOV	#1, R1		; TCP
+	JSR	PC, W5SWR
+	MOV	#S0PORT, R0
+	MOV	#NCPORT, R1
+	JSR	PC, W5SWRW
+	MOV	#S0CR, R0
+	MOV	#CROPEN, R1
+	JSR	PC, W5SWR
+	MOV	#^D1000, R3
+NCOP1:	MOV	#S0SR, R0
+	JSR	PC, W5SRD
+	CMP	R0, #SINIT
+	BEQ	NCOP2
+	SOB	R3, NCOP1	; chip sulking - carry on, pump retries
+NCOP2:	MOV	#S0CR, R0
+	MOV	#CRLIST, R1
+	JSR	PC, W5SWR
+	CLR	NCST
+	RTS	PC
+
+; ---- pump: tend the connection, drain socket RX into the ring -------
+
+NCPUMP:	MOV	#S0SR, R0
+	JSR	PC, W5SRD
+	CMP	R0, #SESTAB
+	BEQ	NCPES
+	CMP	R0, #SCLOSW	; caller hung up: answer the FIN and let
+	BNE	NCPU3		; the chip walk itself to CLOSED
+	MOV	#S0CR, R0
+	MOV	#CRDISC, R1
+	JSR	PC, W5SWR
+	RTS	PC
+NCPU3:	TST	R0		; ONLY SOCK_CLOSED warrants a reopen -
+	BNE	NCPRT		; every other state (LISTEN, and the
+	JSR	PC, NCOPEN	; handshake/teardown transients a fast
+NCPRT:	RTS	PC		; poll loop catches) is progress, not
+				; death; closing then would RST the
+				; caller mid-handshake (seen live)
+
+NCPES:	TST	NCST		; established - new caller?
+	BNE	NCPDR
+	MOV	#1, NCST
+	MOV	#1, NCNEW
+	CLR	TXLEN		; stale output belonged to nobody
+NCPDR:	MOV	#S0RXRS, R0	; two agreeing size reads
+	JSR	PC, W5SRDW
+	MOV	R0, R2
+	MOV	#S0RXRS, R0
+	JSR	PC, W5SRDW
+	CMP	R0, R2
+	BNE	NCPRT		; moving target - next pump gets it
+	TST	R2
+	BEQ	NCPRT
+	MOV	RXHD, R1	; ring space (one slot kept open)
+	SUB	RXTL, R1
+	BIC	#177400, R1
+	MOV	#376, R3
+	SUB	R1, R3
+	BLE	NCPRT		; ring full - reader must catch up
+	CMP	R2, R3
+	BLOS	NCPD1
+	MOV	R3, R2
+NCPD1:	CMP	R2, #100	; at most 64. bytes per pump
+	BLOS	NCPD2
+	MOV	#100, R2
+NCPD2:	MOV	#S0RXRD, R0
+	JSR	PC, W5SRDW
+	MOV	R0, R3
+	MOV	R3, R0
+	MOV	#NCTMP, R1
+	JSR	PC, W5RXRD	; R2 = count, preserved
+	MOV	R3, R1
+	ADD	R2, R1
+	MOV	#S0RXRD, R0
+	JSR	PC, W5SWRW
+	MOV	#S0CR, R0
+	MOV	#CRRECV, R1
+	JSR	PC, W5SWR
+	MOV	#NCTMP, R3	; into the ring
+NCPD3:	MOV	RXHD, R1
+	MOVB	(R3)+, RXRING(R1)
+	INC	R1
+	BIC	#177400, R1
+	MOV	R1, RXHD
+	SOB	R2, NCPD3
+	RTS	PC
+
+; ---- poll one character: R0 = char, or -1 ---------------------------
+
+NCPOLC:	TSTB	@#RCSR		; the physical console outranks the net
+	BPL	NCPO1
+	MOVB	@#RBUF, R0
+	BIC	#177600, R0	; 7-bit ASCII
+	RTS	PC
+NCPO1:	JSR	PC, NCPUMP
+	MOV	RXTL, R1
+	CMP	R1, RXHD
+	BEQ	NCPO2
+	CLR	R0
+	BISB	RXRING(R1), R0
+	INC	R1
+	BIC	#177400, R1
+	MOV	R1, RXTL
+	RTS	PC
+NCPO2:	MOV	#-1, R0
+	RTS	PC
+
+; ---- put a character: SLU now, socket buffered ----------------------
+
+NCPUTC:	MOV	R0, -(SP)
+NCPU1:	TSTB	@#XCSR
+	BPL	NCPU1
+	MOVB	R0, @#XBUF
+	MOV	TXLEN, R1
+	CMP	R1, #100	; buffer full: push it out first
+	BLO	NCPU2
+	JSR	PC, NCFLSH
+	MOV	TXLEN, R1
+NCPU2:	MOV	(SP)+, R0
+	MOVB	R0, TXBUF(R1)
+	INC	TXLEN
+	RTS	PC
+
+; ---- flush the socket-side output buffer ----------------------------
+
+NCFLSH:	TST	TXLEN
+	BEQ	NCFL9
+	CMP	NCST, #1
+	BEQ	NCFL1
+	CLR	TXLEN		; nobody on the line
+	RTS	PC
+NCFL1:	MOV	#S0TXWR, R0
+	JSR	PC, W5SRDW
+	MOV	R0, R3
+	MOV	R3, R0
+	MOV	#TXBUF, R1
+	MOV	TXLEN, R2
+	JSR	PC, W5TXWR
+	MOV	R3, R1
+	ADD	TXLEN, R1
+	MOV	#S0TXWR, R0
+	JSR	PC, W5SWRW
+	MOV	#S0CR, R0
+	MOV	#CRSEND, R1
+	JSR	PC, W5SWR
+	MOV	#^D30000, R3
+NCFL2:	MOV	#S0IR, R0
+	JSR	PC, W5SRD
+	BIT	#SENDOK, R0
+	BNE	NCFL3
+	MOV	#S0SR, R0	; caller died mid-send: let it go
+	JSR	PC, W5SRD
+	CMP	R0, #SESTAB
+	BNE	NCFL4
+	SOB	R3, NCFL2
+	BR	NCFL4
+NCFL3:	MOV	#S0IR, R0
+	MOV	#SENDOK, R1
+	JSR	PC, W5SWR
+NCFL4:	CLR	TXLEN
+NCFL9:	RTS	PC
+
+; ---- state and identity ---------------------------------------------
+
+	.EVEN
+NCST:	.WORD	0		; 0 = listening, 1 = caller on the line
+NCNEW:	.WORD	0		; fresh-connection flag for the caller
+TXLEN:	.WORD	0
+RXHD:	.WORD	0
+RXTL:	.WORD	0
+TXBUF:	.BLKB	102
+RXRING:	.BLKB	400
+NCTMP:	.BLKB	100
+	.EVEN
+NCMAC:	.BYTE	2, 334, 21, 0, 1, 231	; 02:DC:11:00:01:99
+NCIP:	.BYTE	12, 1, 0, 307		; 10.1.0.199
+NCMASK:	.BYTE	377, 377, 377, 0	; /24
+NCGW:	.BYTE	12, 1, 0, 1		; 10.1.0.1
+	.EVEN
