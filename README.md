@@ -27,6 +27,8 @@ MACRO-11 projects for the DCJ-11 SBC and Multi IO card by Peter Schranz
 - [J11Terminal](https://github.com/zoltan-szabo/j11-terminal) — serial
   terminal with ODT upload
 
+<img width="1431" height="1324" alt="j11-terminal" src="https://github.com/user-attachments/assets/d2249248-9562-47a6-92b7-f22efd38aa05" />
+
 Build an example:
 
 ```
