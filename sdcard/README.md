@@ -5,7 +5,7 @@ ladder and 512-byte sector read/write over the W65C22S VIA — plus a
 read-only FAT16 layer on top (mount, walk the directory tree including
 subdirectories, read files by following the cluster chain).
 
-<img width="1000" height="1000" alt="image" src="https://github.com/user-attachments/assets/5d9f19f4-d323-410b-b69a-fd54c3a67a28" />
+<img width="60%" height="60%" alt="image" src="https://github.com/user-attachments/assets/5d9f19f4-d323-410b-b69a-fd54c3a67a28" />
 
 
 **Status:** init + sector **read** and **read-only FAT16** (root *and*
