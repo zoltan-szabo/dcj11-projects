@@ -2,14 +2,14 @@
 
 Bit-banged SPI-mode SD/microSD access from the PDP-11 — the card init
 ladder and 512-byte sector read/write over the W65C22S VIA — plus a
-read-only FAT16 layer on top (mount, list the root directory, read
-files by following the cluster chain).
+read-only FAT16 layer on top (mount, walk the directory tree including
+subdirectories, read files by following the cluster chain).
 
-**Status:** init + sector **read** and **read-only FAT16** are
-hardware-verified — the PDP-11 mounts a formatted card, lists the root
-directory, and dumps a file's contents. The sector **write** path is
-coded but not yet exercised; FAT is read-only (no create/write) and
-covers the root directory + 8.3 names only.
+**Status:** init + sector **read** and **read-only FAT16** (root *and*
+subdirectories) are hardware-verified — the PDP-11 mounts a formatted
+card, recursively walks the directory tree, and dumps a file's
+contents. The sector **write** path is coded but not yet exercised; FAT
+is read-only (no create/write) and 8.3 names only (long names skipped).
 
 ## Wiring (VIA port B)
 
@@ -37,11 +37,13 @@ A bare passive adapter would need external 3.3 V + level shifting.
   wiring diagnosis), then init, capacity class, and a full hex-dump of
   sector 0.
 - `fat16.mac` — read-only FAT16 on top of `sd.mac`: `FATMNT` (read MBR +
-  BPB, compute geometry), `FATNXT` (root-directory iterator), `FATOPN`
-  + `FATRD` (open by 8.3 name, read via the cluster chain). 32-bit LBAs
-  as word pairs, EIS `MUL` for cluster arithmetic.
-- `fattest.mac` — FAT bring-up: mount, print geometry, list the root
-  directory, then open and dump the first regular file as text.
+  BPB, compute geometry), a directory iterator (`FATNXT`) that walks the
+  root or any subdirectory (`FATDIR0` / `FATCD` / `FATREW`), and file
+  reading (`FATOPN` + `FATRD`) via the cluster chain. 32-bit LBAs as
+  word pairs, EIS `MUL` for cluster arithmetic.
+- `fattest.mac` — FAT bring-up: mount, print geometry, recursively walk
+  the directory tree (indented, with sizes; depth/entry capped), then
+  open and dump the first regular file as text.
 - `sdtest.prj` / `fattest.prj` — J11Terminal projects (origin 1000).
 
 ## Using it

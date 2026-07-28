@@ -3,6 +3,27 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: FAT16 subdirectory descent (2026-07-28)
+
+Generalised the directory iterator to walk any directory, not just the
+fixed root region. A subdirectory is stored exactly like a file — a
+cluster chain of 32-byte entries — so FATNXT now runs in one of two
+modes: root (the fixed ROOTLBA region) or subdir (follow the FAT chain
+from a start cluster). New calls: FATDIR0 (root), FATCD R0=cluster
+(descend; 0 = root), FATREW (rewind current). Descend from a listing by
+FATCD'ing an entry's DECLUS when DEATTR has 0x10; ascend via the ".."
+entry's cluster. Replaced the single DCACHE with DMODE/DSTART/DCLUS/
+DLOADED state.
+
+fattest gained a recursive tree walk (WALK): indented by depth, dirs
+marked "/", sizes shown, "." and ".." skipped, saving/restoring the
+global iterator state around each descent, with depth (6) and entry
+(200) caps so a big tree can't run away. Verified on the card: it walked
+the full macOS `.Spotlight-V100` tree several levels deep (STORE-V2 ->
+AA1BA5~2 -> journal subdirs) and back, then dumped TEST.TXT. The
+"rubbish" was just macOS's Spotlight index that the format left on the
+card, traversed correctly.
+
 ## sdcard: read-only FAT16 (2026-07-28)
 
 `sdcard/fat16.mac` — a read-only FAT16 layer on the raw sector driver.

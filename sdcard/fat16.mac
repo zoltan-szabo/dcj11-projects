@@ -1,9 +1,10 @@
 ; fat16.mac — read-only FAT16 on top of sd.mac (raw SD sector I/O)
 ;
 ; Mounts the first MBR partition, reads its BPB, computes the on-disk
-; geometry, and offers a root-directory iterator plus whole-file reading
-; by following the FAT cluster chain. Read-only: no allocation, no
-; directory or FAT writes. 8.3 names only (long-name entries are skipped).
+; geometry, and offers a directory iterator (root or any subdirectory)
+; plus whole-file reading by following the FAT cluster chain. Read-only:
+; no allocation, no directory or FAT writes. 8.3 names only (long-name
+; entries are skipped).
 ;
 ; All sector numbers are 32-bit LBAs, held as word pairs (low, high) and
 ; passed to sd.mac's SDRD in the R0:R1 register pair. Cluster arithmetic
@@ -13,12 +14,16 @@
 ;	FATMNT	read MBR + BPB, compute geometry -> R0 = 0 ok, else:
 ;		  1 bad MBR signature   2 bad BPB signature
 ;		  3 SD read error
-;	FATDIR0	rewind the root-directory iterator
-;	FATNXT	next valid 8.3 entry -> R0 = 0 got one / 1 = end.
-;		Fields land in DENAME (11 bytes), DEATTR, DECLUS, DESIZE
-;		(DESIZE is a 32-bit low,high pair).
+;	FATDIR0	make the root directory current, rewound
+;	FATCD	R0 = a subdirectory's first cluster (a DECLUS from a
+;		listing, or a ".." cluster; 0 = root) -> make it current
+;	FATREW	rewind the current directory to its start
+;	FATNXT	next valid 8.3 entry of the current directory -> R0 = 0
+;		got one / 1 = end. Fields land in DENAME (11 bytes),
+;		DEATTR, DECLUS, DESIZE (DESIZE is a 32-bit low,high pair).
+;		A subdirectory is DEATTR bit 0x10; descend with FATCD DECLUS.
 ;	FATOPN	R1 -> an 11-byte padded 8.3 name (e.g. "README  TXT");
-;		find it in the root dir -> R0 = 0 found / 1 = not found.
+;		find it in the CURRENT directory -> R0 = 0 found / 1 = not.
 ;		Sets up the file for FATRD.
 ;	FATRD	R2 -> 512-byte buffer; read the next sector of the open
 ;		file -> R0 = byte count in it (0 = end of file).
@@ -155,7 +160,7 @@ FATNX:	MOV	R0, R4
 	ADC	R1
 	MOV	#FATBUF, R2
 	JSR	PC, SDRD
-	MOV	#-1, DCACHE		; FATBUF no longer holds a dir sector
+	CLR	DLOADED			; FATBUF no longer holds a dir sector
 	TST	R0
 	BNE	FNXE
 	ADD	#FATBUF, R5
@@ -164,38 +169,82 @@ FATNX:	MOV	R0, R4
 FNXE:	MOV	#177777, R0		; 0xFFFF -> treated as end of chain
 	RTS	PC
 
-; ---- root-directory iterator ---------------------------------------
+; ---- directory iterator (root OR a subdirectory) -------------------
+; The iterator walks whichever directory is current. The root is the
+; fixed region at ROOTLBA (RDSEC sectors); a subdirectory is a cluster
+; chain, read like a file. Set the current directory with:
+;	FATDIR0	current = the root directory, rewound
+;	FATCD	R0 = a subdirectory's first cluster (its DECLUS from a
+;		listing; the ".." entry's cluster, or 0, is the root);
+;		makes it current and rewinds
+;	FATREW	rewind the current directory to its start
+; then call FATNXT repeatedly, exactly as before.
+;
+; State: DMODE 0=root/1=subdir; DSTART subdir's first cluster; DCLUS
+; the cluster now being read; DSEC sector index (root: into the region;
+; subdir: within DCLUS); DENT entry within the sector; DLOADED = FATBUF
+; holds the current dir sector.
 
-FATDIR0:CLR	DSEC
-	CLR	DENT
-	MOV	#-1, DCACHE
+FATDIR0:CLR	DMODE
+	JSR	PC, FATREW
 	RTS	PC
 
-FATNXT:	CMP	DSEC, RDSEC
-	BHIS	FNEND			; walked the whole fixed root region
-	CMP	DSEC, DCACHE		; cache the current dir sector
-	BEQ	FN1
+FATCD:	TST	R0
+	BEQ	FATDIR0			; cluster 0 -> the root
+	MOV	#1, DMODE
+	MOV	R0, DSTART
+	JSR	PC, FATREW
+	RTS	PC
+
+FATREW:	MOV	DSTART, DCLUS
+	CLR	DSEC
+	CLR	DENT
+	CLR	DLOADED
+	RTS	PC
+
+FATNXT:	TST	DLOADED			; is the current sector in FATBUF?
+	BNE	FNENT
+	TST	DMODE			; no: load it, per mode
+	BNE	FNSUB
+	CMP	DSEC, RDSEC		; root: fixed region
+	BHIS	FNEND
 	MOV	ROOTLBA, R0
 	MOV	ROOTLBA+2, R1
 	ADD	DSEC, R0
 	ADC	R1
-	MOV	#FATBUF, R2
+	BR	FNLOAD
+FNSUB:	CMP	DSEC, SPCLUS		; subdir: advance a cluster if needed
+	BLO	FNSUB1
+	MOV	DCLUS, R0
+	JSR	PC, FATNX
+	MOV	R0, DCLUS
+	CLR	DSEC
+FNSUB1:	CMP	DCLUS, #2		; end of the chain?
+	BLO	FNEND
+	CMP	DCLUS, #177770		; 0xFFF8
+	BHIS	FNEND
+	MOV	DCLUS, R0
+	JSR	PC, CLBA
+	ADD	DSEC, R0
+	ADC	R1
+FNLOAD:	MOV	#FATBUF, R2
 	JSR	PC, SDRD
 	TST	R0
 	BNE	FNEND
-	MOV	DSEC, DCACHE
-FN1:	MOV	DENT, R2		; entry ptr = FATBUF + DENT*32
+	MOV	#1, DLOADED
+FNENT:	MOV	DENT, R2		; entry ptr = FATBUF + DENT*32
 	ASL	R2
 	ASL	R2
 	ASL	R2
 	ASL	R2
 	ASL	R2
 	ADD	#FATBUF, R2
-	INC	DENT			; advance for next call
+	INC	DENT			; advance for the next call
 	CMP	DENT, #^D16
 	BLO	FN2
 	CLR	DENT
 	INC	DSEC
+	CLR	DLOADED			; next call loads a fresh sector
 FN2:	CLR	R0
 	BISB	(R2), R0		; first name byte
 	BEQ	FNEND			; 0x00 = no more entries
@@ -221,10 +270,10 @@ FNCP:	MOVB	(R3)+, (R4)+
 FNEND:	MOV	#1, R0
 	RTS	PC
 
-; ---- open a named file: R1 -> 11-byte 8.3 name ---------------------
+; ---- open a named file in the current directory: R1 -> 8.3 name ----
 
 FATOPN:	MOV	R1, SRCHN
-	JSR	PC, FATDIR0
+	JSR	PC, FATREW
 FO0:	JSR	PC, FATNXT
 	TST	R0
 	BNE	FONF
@@ -309,9 +358,12 @@ NFATS:	.WORD	0		; number of FATs
 RENTC:	.WORD	0		; root entry count
 SPFAT:	.WORD	0		; sectors per FAT
 RDSEC:	.WORD	0		; root-directory sectors
-DSEC:	.WORD	0		; iterator: dir sector index
-DENT:	.WORD	0		; iterator: entry within sector
-DCACHE:	.WORD	-1		; dir sector currently in FATBUF (-1 none)
+DMODE:	.WORD	0		; iterator: 0 = root, 1 = subdirectory
+DSTART:	.WORD	0		; subdirectory's first cluster
+DCLUS:	.WORD	0		; cluster now being read (subdir mode)
+DSEC:	.WORD	0		; sector index (region, or within cluster)
+DENT:	.WORD	0		; entry within the sector
+DLOADED:.WORD	0		; FATBUF holds the current dir sector
 DEATTR:	.WORD	0		; current entry: attribute
 DECLUS:	.WORD	0		;               first cluster
 DESIZE:	.WORD	0, 0		;               size (low, high)
