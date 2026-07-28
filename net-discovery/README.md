@@ -12,7 +12,9 @@ What happened, in order:
    the same pins). Kept as the evidence and the diagnostic ladder.
 2. **W5500** (`w5500.mac`, `w5test.mac`) — VERSIONR, link, IP config:
    the machine answers ping as 10.1.0.199/24 (MAC 02:DC:11:00:01:99),
-   ARP/ICMP in silicon, 4/4 replies at ~2 ms.
+   ARP/ICMP in silicon, 4/4 replies at ~2 ms.  
+   <img width="405" height="304" alt="image" src="https://github.com/user-attachments/assets/7016d8c9-9dd5-46c7-880b-8ffcb6c1172d" />
+
 3. **UDP echo** (`w5udp.mac`) — port 7, packet counter on the VQC10
    panel, 50/50 byte-correct; latency set by the panel scan.
 4. **TCP listener** (`w5tcp.mac`) — port 23, greeting carries live
