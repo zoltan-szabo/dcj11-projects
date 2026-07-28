@@ -19,7 +19,7 @@ MACRO-11 projects for the DCJ-11 SBC and Multi IO card by Peter Schranz
 | `net-discovery/` | The Ethernet bring-up campaign (archived): ENC28J60 (shelved — rotates SPI reads) and W5500, up to a ping-answering, telnet-able PDP-11. See HISTORY |
 | `netmon/` | The living network project: an ODT-style monitor served over a TCP/SLU mirrored console (`telnet 10.1.0.199` / `nc`) — examine/deposit/go, trap CATCH, W5500 |
 | `radio/` | FM radio project: TEA5767 tuner + display (MAX7219 matrix, or DM8BA10 LCD variant) |
-| `sdcard/` | microSD over SPI (VIA port B): init ladder + 512-byte sector read/write, plus a read-only FAT16 layer (mount, list root, read files) |
+| `sdcard/` | microSD over SPI (VIA port B): init ladder + 512-byte sector read/write, plus a read-only FAT16 layer (mount, walk the directory tree, read files) |
 | `spi/` | Software (bit-banged) SPI master on VIA port B (mode 0, MSB first) |
 | `tea5767/` | TEA5767 FM radio driver (over i2c), plus a tune example |
 | `vqc10/` | Pure driver for the DisplayVQC10 panel (two VQC10 5x7 LED matrix modules behind 74HC595s), plus a DS3231 clock demo |

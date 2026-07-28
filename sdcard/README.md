@@ -53,6 +53,11 @@ card you should see the init succeed, `SDHC BLOCK-ADDRESSED`, and the
 MBR in the sector-0 dump — the partition entry at offset 0x1BE and
 `55 AA` at 0x1FE.
 
+`fattest.prj` is the FAT layer: it mounts, prints the geometry, walks
+the directory tree, and dumps the first file. (A card formatted on a Mac
+carries a `.Spotlight-V100` tree — real macOS index data, listed
+correctly but noisy; a card you populate yourself is cleaner.)
+
 `SDINI` error codes (also in the source header): 1 no card, 2 CMD0 never
 idle, 3 CMD8 rejected, 4 ACMD41 timeout, 5 CMD58/OCR. The `PROBE` line
 distinguishes hardware faults: all `FF` = card silent (power/level/MISO),
@@ -61,10 +66,10 @@ is answering.
 
 ## Card format
 
-Small FAT16 (≤ 2 GB, MBR) is the least code for a future filesystem
-layer; the MBR read here already reports the FAT16 volume starting at
-LBA 2048. For PDP-11-only storage a filesystem is optional — the sector
-layer alone backs a raw disk image or program library.
+Small FAT16 (≤ 2 GB, MBR) is what the FAT layer here reads; the volume
+starts at LBA 2048 on a Mac-formatted card. For PDP-11-only storage a
+filesystem is optional — the raw sector layer alone backs a disk image
+or program library.
 
 Runs on the DCJ-11 SBC + Multi IO card by Peter Schranz
 (https://www.5volts.ch/pages/dcj11sbc/).
