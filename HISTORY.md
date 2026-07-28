@@ -3,6 +3,35 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: read-only FAT16 (2026-07-28)
+
+`sdcard/fat16.mac` — a read-only FAT16 layer on the raw sector driver.
+FATMNT reads the MBR (partition-1 start LBA), reads the BPB there, and
+computes the region geometry: fatStart = partStart + reserved;
+rootStart = fatStart + nFATs*secPerFAT; rootDirSec = ceil(rootEnt*32 /
+512); dataStart = rootStart + rootDirSec. FATNXT iterates the fixed
+root-directory region (skips 0xE5 deleted, 0x0F long-name, 0x08 volume
+label). FATOPN/FATRD open by 8.3 name and stream the file, following
+the 16-bit FAT chain (entry N at FAT byte N*2; >=0xFFF8 = end). All
+LBAs are 32-bit word pairs; cluster->LBA uses EIS MUL and the ADC/SBC
+idioms. Root directory + 8.3 only; no subdirectory descent, no writes.
+
+`fattest.mac` mounts, prints geometry, lists the root dir, and dumps
+the first regular file. Hardware-verified on the 2 GB FAT16 card: the
+computed geometry was exact (64 sec/cluster, 1 reserved, two 239-sector
+FATs, 32-sector root dir), the listing showed the real entries
+(SPOTLI~1/TMP dirs, TEST.TXT, README.MD), and a file read back byte-for-
+byte.
+
+Gotchas: m11asm has no `N.` decimal literal (use `^D`) — a bulk convert
+then wrongly decimalised three offsets that were meant as OCTAL (dir
+entry fields 0x1A/0x1C/0x1E = octal 32/34/36, not `^D32/34/36`) and the
+>>9 shift count; caught by re-reading the constants before the run. And
+a label collision: the test's dump-loop `DSEC` clashed with fat16's
+dir-sector variable `DSEC` (renamed to DUMPS). Text files show a
+staircase unless bare LF is expanded to CR+LF (Unix line endings) — the
+dumper now does that; the file data itself was always correct.
+
 ## sdcard: raw microSD block driver (2026-07-28)
 
 `sdcard/sd.mac` — SD/microSD over SPI on VIA port B (CS=PB3, SCK=PB4,

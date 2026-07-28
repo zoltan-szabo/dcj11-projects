@@ -1,13 +1,15 @@
-# sdcard — raw microSD driver for the DCJ-11
+# sdcard — microSD driver + read-only FAT16 for the DCJ-11
 
-Bit-banged SPI-mode SD/microSD access from the PDP-11: the card
-initialisation ladder and 512-byte sector read/write, over the W65C22S
-VIA on the Multi IO card. No filesystem yet — this is the block layer a
-FAT (or a raw disk image) would sit on.
+Bit-banged SPI-mode SD/microSD access from the PDP-11 — the card init
+ladder and 512-byte sector read/write over the W65C22S VIA — plus a
+read-only FAT16 layer on top (mount, list the root directory, read
+files by following the cluster chain).
 
-**Status:** init + sector **read** are hardware-verified — the PDP-11
-reads a formatted card's MBR (partition table + `55 AA` signature). The
-sector **write** path is coded but not yet exercised on hardware.
+**Status:** init + sector **read** and **read-only FAT16** are
+hardware-verified — the PDP-11 mounts a formatted card, lists the root
+directory, and dumps a file's contents. The sector **write** path is
+coded but not yet exercised; FAT is read-only (no create/write) and
+covers the root directory + 8.3 names only.
 
 ## Wiring (VIA port B)
 
@@ -34,7 +36,13 @@ A bare passive adapter would need external 3.3 V + level shifting.
 - `sdtest.mac` — bring-up: a raw-CMD0 `PROBE` (dumps the MISO reply for
   wiring diagnosis), then init, capacity class, and a full hex-dump of
   sector 0.
-- `sdtest.prj` — J11Terminal project (origin 1000).
+- `fat16.mac` — read-only FAT16 on top of `sd.mac`: `FATMNT` (read MBR +
+  BPB, compute geometry), `FATNXT` (root-directory iterator), `FATOPN`
+  + `FATRD` (open by 8.3 name, read via the cluster chain). 32-bit LBAs
+  as word pairs, EIS `MUL` for cluster arithmetic.
+- `fattest.mac` — FAT bring-up: mount, print geometry, list the root
+  directory, then open and dump the first regular file as text.
+- `sdtest.prj` / `fattest.prj` — J11Terminal projects (origin 1000).
 
 ## Using it
 

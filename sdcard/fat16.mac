@@ -1,0 +1,325 @@
+; fat16.mac — read-only FAT16 on top of sd.mac (raw SD sector I/O)
+;
+; Mounts the first MBR partition, reads its BPB, computes the on-disk
+; geometry, and offers a root-directory iterator plus whole-file reading
+; by following the FAT cluster chain. Read-only: no allocation, no
+; directory or FAT writes. 8.3 names only (long-name entries are skipped).
+;
+; All sector numbers are 32-bit LBAs, held as word pairs (low, high) and
+; passed to sd.mac's SDRD in the R0:R1 register pair. Cluster arithmetic
+; uses the J-11 EIS MUL (16x16 -> 32 in a register pair).
+;
+; API (rely on SDINI having succeeded first):
+;	FATMNT	read MBR + BPB, compute geometry -> R0 = 0 ok, else:
+;		  1 bad MBR signature   2 bad BPB signature
+;		  3 SD read error
+;	FATDIR0	rewind the root-directory iterator
+;	FATNXT	next valid 8.3 entry -> R0 = 0 got one / 1 = end.
+;		Fields land in DENAME (11 bytes), DEATTR, DECLUS, DESIZE
+;		(DESIZE is a 32-bit low,high pair).
+;	FATOPN	R1 -> an 11-byte padded 8.3 name (e.g. "README  TXT");
+;		find it in the root dir -> R0 = 0 found / 1 = not found.
+;		Sets up the file for FATRD.
+;	FATRD	R2 -> 512-byte buffer; read the next sector of the open
+;		file -> R0 = byte count in it (0 = end of file).
+;
+; Directory attribute bits: 0x10 dir, 0x08 volume label, 0x0F long name.
+
+; ---- mount: MBR then BPB, then compute the region LBAs --------------
+
+FATMNT:	CLR	R0			; read MBR (LBA 0)
+	CLR	R1
+	MOV	#FATBUF, R2
+	JSR	PC, SDRD
+	TST	R0
+	BEQ	FM1
+	MOV	#3, R0
+	RTS	PC
+FM1:	JSR	PC, FMSIG		; 55 AA at 0x1FE?
+	BCC	FM2
+	MOV	#1, R0
+	RTS	PC
+FM2:	MOV	#FATBUF+706, R1		; part-1 start LBA at 0x1C6 (lo word)
+	JSR	PC, RDW
+	MOV	R0, PSTART
+	MOV	#FATBUF+710, R1		; 0x1C8 (hi word)
+	JSR	PC, RDW
+	MOV	R0, PSTART+2
+
+	MOV	PSTART, R0		; read the BPB at the partition start
+	MOV	PSTART+2, R1
+	MOV	#FATBUF, R2
+	JSR	PC, SDRD
+	TST	R0
+	BEQ	FM3
+	MOV	#3, R0
+	RTS	PC
+FM3:	JSR	PC, FMSIG
+	BCC	FM4
+	MOV	#2, R0
+	RTS	PC
+FM4:	MOV	#FATBUF+15, R1		; 0x0D sectors/cluster (byte)
+	JSR	PC, RDB
+	MOV	R0, SPCLUS
+	MOV	#FATBUF+16, R1		; 0x0E reserved sectors (word)
+	JSR	PC, RDW
+	MOV	R0, RESSEC
+	MOV	#FATBUF+20, R1		; 0x10 number of FATs (byte)
+	JSR	PC, RDB
+	MOV	R0, NFATS
+	MOV	#FATBUF+21, R1		; 0x11 root entry count (word)
+	JSR	PC, RDW
+	MOV	R0, RENTC
+	MOV	#FATBUF+26, R1		; 0x16 sectors per FAT (word)
+	JSR	PC, RDW
+	MOV	R0, SPFAT
+
+	MOV	PSTART, R0		; fatStart = partStart + reserved
+	MOV	PSTART+2, R1
+	ADD	RESSEC, R0
+	ADC	R1
+	MOV	R0, FATLBA
+	MOV	R1, FATLBA+2
+
+	MOV	NFATS, R2		; rootStart = fatStart + nFATs*secPerFAT
+	MUL	R2, SPFAT		; R2:R3 = product (R2 hi, R3 lo)
+	MOV	FATLBA, R0
+	MOV	FATLBA+2, R1
+	ADD	R3, R0
+	ADC	R1
+	ADD	R2, R1
+	MOV	R0, ROOTLBA
+	MOV	R1, ROOTLBA+2
+
+	MOV	RENTC, R2		; rootDirSec = ceil(rentc*32 / 512)
+	MUL	R2, #40			; R2:R3 = rentc * 32 (40 octal)
+	ADD	#777, R3		; + 511 for the round-up
+	ADC	R2
+	MOV	#^D9, R4		; >>9  (÷512), logical
+FMRS:	CLC
+	ROR	R2
+	ROR	R3
+	SOB	R4, FMRS
+	MOV	R3, RDSEC
+
+	MOV	ROOTLBA, R0		; dataStart = rootStart + rootDirSec
+	MOV	ROOTLBA+2, R1
+	ADD	RDSEC, R0
+	ADC	R1
+	MOV	R0, DATALBA
+	MOV	R1, DATALBA+2
+	CLR	R0
+	RTS	PC
+
+; signature check on FATBUF: C clear if 55 AA at 0x1FE, else C set
+
+FMSIG:	CLR	R0
+	BISB	FATBUF+776, R0		; 0x1FE
+	CMP	R0, #125		; 0x55
+	BNE	FMSBAD
+	CLR	R0
+	BISB	FATBUF+777, R0		; 0x1FF
+	CMP	R0, #252		; 0xAA
+	BNE	FMSBAD
+	CLC
+	RTS	PC
+FMSBAD:	SEC
+	RTS	PC
+
+; ---- cluster -> first LBA: R0 = cluster -> R0:R1 = LBA --------------
+; LBA = dataStart + (cluster - 2) * sectorsPerCluster.  Clobbers R2/R3.
+
+CLBA:	MOV	R0, R2
+	SUB	#2, R2
+	MUL	R2, SPCLUS		; R2:R3 = (clus-2)*spc
+	MOV	DATALBA, R0
+	MOV	DATALBA+2, R1
+	ADD	R3, R0
+	ADC	R1
+	ADD	R2, R1
+	RTS	PC
+
+; ---- FAT lookup: R0 = cluster -> R0 = next cluster -----------------
+; Entry N is a 16-bit LE word at byte N*2 of the FAT. Reads that FAT
+; sector into FATBUF (so it invalidates the dir cache). 0xFFFF on error.
+
+FATNX:	MOV	R0, R4
+	SWAB	R4
+	BIC	#177400, R4		; R4 = cluster >> 8  = FAT sector offset
+	MOV	R0, R5
+	BIC	#177400, R5		; R5 = cluster & 0xFF
+	ASL	R5			; *2 = byte offset in the sector
+	MOV	FATLBA, R0
+	MOV	FATLBA+2, R1
+	ADD	R4, R0
+	ADC	R1
+	MOV	#FATBUF, R2
+	JSR	PC, SDRD
+	MOV	#-1, DCACHE		; FATBUF no longer holds a dir sector
+	TST	R0
+	BNE	FNXE
+	ADD	#FATBUF, R5
+	MOV	(R5), R0		; LE word, R5 even
+	RTS	PC
+FNXE:	MOV	#177777, R0		; 0xFFFF -> treated as end of chain
+	RTS	PC
+
+; ---- root-directory iterator ---------------------------------------
+
+FATDIR0:CLR	DSEC
+	CLR	DENT
+	MOV	#-1, DCACHE
+	RTS	PC
+
+FATNXT:	CMP	DSEC, RDSEC
+	BHIS	FNEND			; walked the whole fixed root region
+	CMP	DSEC, DCACHE		; cache the current dir sector
+	BEQ	FN1
+	MOV	ROOTLBA, R0
+	MOV	ROOTLBA+2, R1
+	ADD	DSEC, R0
+	ADC	R1
+	MOV	#FATBUF, R2
+	JSR	PC, SDRD
+	TST	R0
+	BNE	FNEND
+	MOV	DSEC, DCACHE
+FN1:	MOV	DENT, R2		; entry ptr = FATBUF + DENT*32
+	ASL	R2
+	ASL	R2
+	ASL	R2
+	ASL	R2
+	ASL	R2
+	ADD	#FATBUF, R2
+	INC	DENT			; advance for next call
+	CMP	DENT, #^D16
+	BLO	FN2
+	CLR	DENT
+	INC	DSEC
+FN2:	CLR	R0
+	BISB	(R2), R0		; first name byte
+	BEQ	FNEND			; 0x00 = no more entries
+	CMP	R0, #345		; 0xE5 deleted
+	BEQ	FATNXT
+	CLR	R0
+	BISB	13(R2), R0		; 0x0B attribute
+	CMP	R0, #17			; 0x0F long-name entry
+	BEQ	FATNXT
+	BIT	#10, R0			; 0x08 volume label
+	BNE	FATNXT
+	MOV	R0, DEATTR
+	MOV	R2, R3			; copy the 11-byte name
+	MOV	#DENAME, R4
+	MOV	#^D11, R5
+FNCP:	MOVB	(R3)+, (R4)+
+	SOB	R5, FNCP
+	MOV	32(R2), DECLUS		; 0x1A first cluster (low)  [octal 32]
+	MOV	34(R2), DESIZE		; 0x1C size low             [octal 34]
+	MOV	36(R2), DESIZE+2	; 0x1E size high            [octal 36]
+	CLR	R0
+	RTS	PC
+FNEND:	MOV	#1, R0
+	RTS	PC
+
+; ---- open a named file: R1 -> 11-byte 8.3 name ---------------------
+
+FATOPN:	MOV	R1, SRCHN
+	JSR	PC, FATDIR0
+FO0:	JSR	PC, FATNXT
+	TST	R0
+	BNE	FONF
+	MOV	#DENAME, R3
+	MOV	SRCHN, R4
+	MOV	#^D11, R5
+FOC:	CMPB	(R3)+, (R4)+
+	BNE	FO0
+	SOB	R5, FOC
+	MOV	DECLUS, FCLUS		; matched: set up the file
+	MOV	DESIZE, FSIZE
+	MOV	DESIZE+2, FSIZE+2
+	CLR	FSECI
+	CLR	R0
+	RTS	PC
+FONF:	MOV	#1, R0
+	RTS	PC
+
+; ---- read the next sector of the open file: R2 -> buffer -----------
+; Returns R0 = bytes placed (0 = end of file).
+
+FATRD:	TST	FSIZE			; remaining bytes == 0 -> EOF
+	BNE	FR1
+	TST	FSIZE+2
+	BEQ	FREOF
+FR1:	CMP	FCLUS, #2		; a valid data cluster?
+	BLO	FREOF
+	CMP	FCLUS, #177770		; 0xFFF8 end-of-chain
+	BHIS	FREOF
+	MOV	R2, -(SP)		; read cluster sector FSECI into buf
+	MOV	FCLUS, R0
+	JSR	PC, CLBA
+	ADD	FSECI, R0
+	ADC	R1
+	MOV	(SP)+, R2
+	JSR	PC, SDRD
+	TST	R0
+	BNE	FREOF
+	TST	FSIZE+2			; bytes this sector = min(512, left)
+	BNE	FRFULL
+	CMP	FSIZE, #^D512
+	BLO	FRPART
+FRFULL:	MOV	#^D512, R3
+	BR	FR2
+FRPART:	MOV	FSIZE, R3
+FR2:	SUB	R3, FSIZE		; remaining -= count (32-bit)
+	SBC	FSIZE+2
+	INC	FSECI			; next sector; cross cluster if needed
+	CMP	FSECI, SPCLUS
+	BLO	FR3
+	CLR	FSECI
+	MOV	FCLUS, R0
+	JSR	PC, FATNX
+	MOV	R0, FCLUS
+FR3:	MOV	R3, R0
+	RTS	PC
+FREOF:	CLR	R0
+	RTS	PC
+
+; ---- little-endian readers from a (maybe odd) byte pointer R1 ------
+; RDW -> R0 = 16-bit LE word.  RDB -> R0 = zero-extended byte.  Keep R1.
+
+RDW:	CLR	R0
+	BISB	1(R1), R0
+	SWAB	R0
+	BISB	(R1), R0
+	RTS	PC
+RDB:	CLR	R0
+	BISB	(R1), R0
+	RTS	PC
+
+; ---- geometry + iterator state + sector buffer ---------------------
+
+	.EVEN
+PSTART:	.WORD	0, 0		; partition start LBA
+FATLBA:	.WORD	0, 0		; first FAT sector
+ROOTLBA:.WORD	0, 0		; first root-directory sector
+DATALBA:.WORD	0, 0		; first data sector (cluster 2)
+SPCLUS:	.WORD	0		; sectors per cluster
+RESSEC:	.WORD	0		; reserved sectors
+NFATS:	.WORD	0		; number of FATs
+RENTC:	.WORD	0		; root entry count
+SPFAT:	.WORD	0		; sectors per FAT
+RDSEC:	.WORD	0		; root-directory sectors
+DSEC:	.WORD	0		; iterator: dir sector index
+DENT:	.WORD	0		; iterator: entry within sector
+DCACHE:	.WORD	-1		; dir sector currently in FATBUF (-1 none)
+DEATTR:	.WORD	0		; current entry: attribute
+DECLUS:	.WORD	0		;               first cluster
+DESIZE:	.WORD	0, 0		;               size (low, high)
+SRCHN:	.WORD	0		; FATOPN: name being searched for
+FCLUS:	.WORD	0		; open file: current cluster
+FSIZE:	.WORD	0, 0		;            bytes remaining (low, high)
+FSECI:	.WORD	0		;            sector within the cluster
+DENAME:	.BLKB	^D11		; current entry name (8.3, space padded)
+	.EVEN
+FATBUF:	.BLKB	^D512		; one sector: MBR / BPB / dir / FAT
+	.EVEN

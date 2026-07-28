@@ -1,0 +1,282 @@
+; fattest.mac — FAT16 read-only bring-up: mount, list root, dump a file
+;
+; SDINI -> FATMNT, prints the computed geometry (hex), lists the root
+; directory (name, <DIR> or size, first cluster), remembers the first
+; regular file, then opens it and dumps its contents as text. Put a few
+; files on the card first (e.g. a README.TXT); an empty card just lists
+; nothing.
+;
+; Numbers are shown in hex. LBAs are 32-bit (8 digits, high word first).
+;
+; Assemble:	part of fattest.prj (origin 1000); run with P or 1000G.
+
+.	= 1000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+
+START:	MOV	#340, @#177776	; priority 7
+	MOV	#1000, SP
+	MOV	#MHELLO, R1
+	JSR	PC, PMSG
+
+	JSR	PC, SDINI	; bring up the card
+	TST	R0
+	BEQ	MOUNT
+	MOV	#MNOSD, R1
+	JSR	PC, PMSG
+	HALT
+
+MOUNT:	JSR	PC, FATMNT
+	TST	R0
+	BEQ	GEO
+	MOV	R0, R4		; mount error code
+	MOV	#MNOMNT, R1
+	JSR	PC, PMSG
+	MOV	R4, R0
+	ADD	#60, R0
+	JSR	PC, PUTC
+	JSR	PC, PCRLF
+	HALT
+
+GEO:	MOV	#MSPC, R1	; sectors/cluster
+	JSR	PC, PMSG
+	MOV	SPCLUS, R0
+	JSR	PC, PHEX4
+	JSR	PC, PCRLF
+	MOV	#MRDS, R1	; root-dir sectors
+	JSR	PC, PMSG
+	MOV	RDSEC, R0
+	JSR	PC, PHEX4
+	JSR	PC, PCRLF
+	MOV	#MFAT, R1	; FAT / root / data LBAs
+	JSR	PC, PMSG
+	MOV	#FATLBA, R1
+	JSR	PC, PHEX8
+	JSR	PC, PCRLF
+	MOV	#MROOT, R1
+	JSR	PC, PMSG
+	MOV	#ROOTLBA, R1
+	JSR	PC, PHEX8
+	JSR	PC, PCRLF
+	MOV	#MDATA, R1
+	JSR	PC, PMSG
+	MOV	#DATALBA, R1
+	JSR	PC, PHEX8
+	JSR	PC, PCRLF
+
+; ---- list the root directory ----------------------------------------
+
+	MOV	#MLIST, R1
+	JSR	PC, PMSG
+	CLR	HAVEF		; no file remembered yet
+	JSR	PC, FATDIR0
+LOOP:	JSR	PC, FATNXT
+	TST	R0
+	BNE	LDONE
+	MOV	#DENAME, R1	; the 8.3 name
+	JSR	PC, PNAME
+	MOV	#MTAB, R1
+	JSR	PC, PMSG
+	BIT	#20, DEATTR	; 0x10 = directory
+	BEQ	LFILE
+	MOV	#MDIR, R1	; "<DIR>"
+	JSR	PC, PMSG
+	BR	LNEXT
+LFILE:	MOV	DESIZE+2, R0	; size, 32-bit hex
+	JSR	PC, PHEX4
+	MOV	DESIZE, R0
+	JSR	PC, PHEX4
+	TST	HAVEF		; remember the first regular file
+	BNE	LNEXT
+	MOV	#1, HAVEF
+	MOV	#DENAME, R3
+	MOV	#FFNAME, R4
+	MOV	#^D11, R5
+LSAV:	MOVB	(R3)+, (R4)+
+	SOB	R5, LSAV
+LNEXT:	MOV	#MSPACE, R1	; cluster in hex
+	JSR	PC, PMSG
+	MOV	DECLUS, R0
+	JSR	PC, PHEX4
+	JSR	PC, PCRLF
+	BR	LOOP
+
+LDONE:	TST	HAVEF		; any regular file to dump?
+	BNE	DUMP
+	MOV	#MNOF, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- open and dump the first file as text ---------------------------
+
+DUMP:	MOV	#MDUMP, R1
+	JSR	PC, PMSG
+	MOV	#FFNAME, R1
+	JSR	PC, PNAME
+	JSR	PC, PCRLF
+	MOV	#FFNAME, R1
+	JSR	PC, FATOPN
+	TST	R0
+	BEQ	DRD
+	MOV	#MOPNF, R1
+	JSR	PC, PMSG
+	HALT
+DRD:	MOV	#^D8, R5		; cap the dump at 8 sectors (4 KB)
+DUMPS:	MOV	#DBUF, R2
+	JSR	PC, FATRD
+	TST	R0
+	BEQ	DEND
+	MOV	R0, R3		; bytes in this sector
+	MOV	#DBUF, R4
+DBYTE:	CLR	R0
+	BISB	(R4)+, R0
+	CMP	R0, #15		; CR: swallow (the LF emits the newline)
+	BEQ	DADV
+	CMP	R0, #12		; LF: emit CR+LF so lines don't staircase
+	BEQ	DNL
+	CMP	R0, #40		; printable range 0x20..0x7E
+	BLO	DDOT
+	CMP	R0, #176
+	BHI	DDOT
+	JSR	PC, PUTC
+	BR	DADV
+DNL:	JSR	PC, PCRLF
+	BR	DADV
+DDOT:	MOV	#56, R0		; '.' for a non-printable byte
+	JSR	PC, PUTC
+DADV:	SOB	R3, DBYTE
+	SOB	R5, DUMPS
+DEND:	JSR	PC, PCRLF
+	MOV	#MDONE, R1
+	JSR	PC, PMSG
+	HALT
+	JMP	START
+
+; ---- print an 8.3 name from R1 (11 padded bytes); keeps R1 ----------
+
+PNAME:	MOV	R1, R3
+	MOV	#^D8, R4
+PN1:	CLR	R0
+	BISB	(R3)+, R0
+	CMP	R0, #40		; stop the name field at the first space
+	BEQ	PN2
+	JSR	PC, PUTC
+	SOB	R4, PN1
+PN2:	MOV	R1, R3
+	ADD	#^D8, R3		; extension field
+	CLR	R0
+	BISB	(R3), R0
+	CMP	R0, #40
+	BEQ	PN9		; no extension
+	MOV	#56, R0		; '.'
+	JSR	PC, PUTC
+	MOV	#^D3, R4
+PN3:	CLR	R0
+	BISB	(R3)+, R0
+	CMP	R0, #40
+	BEQ	PN9
+	JSR	PC, PUTC
+	SOB	R4, PN3
+PN9:	RTS	PC
+
+; ---- console ---------------------------------------------------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMSG2
+	JSR	PC, PUTC
+	BR	PMSG
+PMSG2:	RTS	PC
+
+PCRLF:	MOV	#15, R0
+	JSR	PC, PUTC
+	MOV	#12, R0
+	JSR	PC, PUTC
+	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+; print R1 -> 2-word LBA (lo,hi) as 8 hex digits, high word first
+
+PHEX8:	MOV	2(R1), R0
+	JSR	PC, PHEX4
+	MOV	(R1), R0
+	JSR	PC, PHEX4
+	RTS	PC
+
+PHEX4:	MOV	R0, -(SP)
+	SWAB	R0
+	JSR	PC, PHEX2
+	MOV	(SP)+, R0
+	JSR	PC, PHEX2
+	RTS	PC
+
+PHEX2:	BIC	#177400, R0
+	MOV	R0, -(SP)
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	JSR	PC, PNIB
+	MOV	(SP)+, R0
+	JSR	PC, PNIB
+	RTS	PC
+
+PNIB:	BIC	#177760, R0
+	CMP	R0, #^D9
+	BGT	PNA
+	ADD	#60, R0
+	BR	PNP
+PNA:	ADD	#^D55, R0	; 'A'-10  (nibble 10 -> 'A' = 0x41 = 65.)
+PNP:	JSR	PC, PUTC
+	RTS	PC
+
+; ---- messages and buffers -------------------------------------------
+
+MHELLO:	.ASCII	/FATTEST/
+	.BYTE	15, 12, 0
+MNOSD:	.ASCII	/SD INIT FAILED/
+	.BYTE	15, 12, 0
+MNOMNT:	.ASCII	/MOUNT FAILED CODE /
+	.BYTE	0
+MSPC:	.ASCII	/SEC-CLUS  /
+	.BYTE	0
+MRDS:	.ASCII	/ROOTDIRSEC /
+	.BYTE	0
+MFAT:	.ASCII	/FAT  LBA  /
+	.BYTE	0
+MROOT:	.ASCII	/ROOT LBA  /
+	.BYTE	0
+MDATA:	.ASCII	/DATA LBA  /
+	.BYTE	0
+MLIST:	.ASCII	/--- ROOT DIRECTORY ---/
+	.BYTE	15, 12, 0
+MTAB:	.ASCII	/  /
+	.BYTE	0
+MSPACE:	.ASCII	/  c=/
+	.BYTE	0
+MDIR:	.ASCII	/<DIR>/
+	.BYTE	0
+MNOF:	.ASCII	/NO REGULAR FILE TO DUMP/
+	.BYTE	15, 12, 0
+MDUMP:	.ASCII	/--- DUMP /
+	.BYTE	0
+MOPNF:	.ASCII	/OPEN FAILED/
+	.BYTE	15, 12, 0
+MDONE:	.ASCII	/--- DONE/
+	.BYTE	15, 12, 0
+	.EVEN
+
+HAVEF:	.WORD	0		; a file has been remembered
+FFNAME:	.BLKB	^D11		; first regular file's 8.3 name
+	.EVEN
+DBUF:	.BLKB	^D512		; file-read buffer
+	.EVEN
+
+	.INCLUDE "fat16.mac"
+	.INCLUDE "sd.mac"
+
+	.END	START
