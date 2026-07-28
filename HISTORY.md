@@ -3,6 +3,45 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: raw microSD block driver (2026-07-28)
+
+`sdcard/sd.mac` — SD/microSD over SPI on VIA port B (CS=PB3, SCK=PB4,
+MOSI=PB5, MISO=PB6; own SPI mode-0 primitives, since the SD pin map
+differs from spi.mac). The init ladder (CMD0 GO_IDLE, CMD8 SEND_IF_COND,
+ACMD41 with HCS, CMD58 READ_OCR) plus single-block read/write
+(CMD17/CMD24) of 512-byte sectors. Block-addressed SDHC/SDXC only; the
+32-bit LBA is passed as an R0:R1 register pair and staged big-endian by
+SDLBA. CRC is hardcoded only where it's checked (CMD0=0x95, CMD8=0x87);
+after init SPI mode ignores it. `sdtest.mac` inits, prints the capacity
+class, and hex-dumps sector 0.
+
+Hardware-verified on an 8 GB card (Catalex-style breakout: AMS1117-3.3 +
+SN74HC125 buffer, fed 5 V): init OK, SDHC block-addressed, and sector 0
+read back as a byte-perfect MBR — partition entry at 0x1BE with type
+0x06 (FAT16), start LBA 2048, ~1.86 GB, and 55 AA at 0x1FE, exactly the
+2 GB FAT16 volume the card was formatted with. The write path is coded
+but not yet exercised.
+
+Two bugs found during bring-up, both classic bit-bang traps:
+- SDCMD built the command byte with `BIS #100,R0` AFTER a priming
+  SDIDLE — but SDIDLE returns its received byte in R0, so the command
+  index was clobbered and every command went out corrupt. The tell was
+  that a hand-coded CMD0 (which set R0 fresh) got a clean 0x01 idle
+  reply while SDINI failed. Fix: stash the command byte before the
+  prime. Lesson: a helper that returns a value in the register you're
+  using to hold state will eat it.
+- Several early arg-setup lines used `MOV #^D1AA,...` (not valid
+  decimal) and word CLRs at odd addresses (`CLR CMDARG+1/+3`, which
+  would trap). Replaced with the SDLBA register-pair path and byte ops.
+
+sdtest keeps a raw-CMD0 PROBE that dumps the MISO reply before the
+ladder, so a wiring/power fault is legible even when init can't start
+(all FF = silent, all 00 = MISO stuck low, a bit-7-clear byte = the
+card is answering). It is what pinpointed the R0-clobber in one run.
+
+Next: exercise SDWR against a scratch sector outside the FAT volume
+(e.g. LBA 100), then a read-only FAT16 layer starting at LBA 2048.
+
 ## net: W5500 — the PDP-11 answers ping; ENC28J60 convicted (2026-07-24)
 
 Plot twist resolved by a second witness. A W5500 module went onto the

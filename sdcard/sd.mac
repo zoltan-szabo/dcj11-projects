@@ -1,0 +1,304 @@
+; sd.mac — raw SD/microSD card driver (SPI mode) for the DCJ-11
+;
+; Bit-banged SPI mode 0 on the W65C22S VIA port B, plus the SD card
+; protocol on top: init ladder (CMD0/CMD8/ACMD41/CMD58) and single-block
+; read/write (CMD17/CMD24) of 512-byte sectors. Block-addressed only
+; (SDHC/SDXC — essentially every modern microSD); byte-addressed SDSC
+; cards are detected and reported but not offset-corrected here.
+;
+; This carries its OWN SPI primitives (not spi.mac): the SD adapter uses
+; a different pin map, and SD needs the >=74-clock wake and a card-tuned
+; transfer. Only PB3-PB6 are touched; PB0-2 (I2C/SQW) and PB7 are free.
+;
+; Wiring (Multi IO card, VIA port B -> microSD adapter):
+;	CS   - PB3	chip select, active low
+;	SCK  - PB4
+;	MOSI - PB5	-> card DI (CMD)
+;	MISO - PB6	<- card DO (DAT0)
+; The card is 3.3 V-only on every pin. Tested on a Catalex-style
+; breakout module (AMS1117-3.3 regulator + SN74HC125 quad buffer as the
+; level shifter) fed from 5 V: it takes the 5 V VIA lines directly and
+; drives MISO back at a level the 5 V VIA reads reliably.
+;
+; A "sector number" is a 32-bit LBA in a register PAIR: R0 = low 16
+; bits, R1 = high 16 bits. SDRD/SDWR stage it via SDLBA internally.
+;
+; API:
+;	SDINI	power-up + init ladder -> R0 = 0 ok, else an error code:
+;		  1 no card (no R1)   2 CMD0 idle failed
+;		  3 CMD8 rejected     4 ACMD41 timeout   5 CMD58/OCR bad
+;		(clobbers R0-R5)
+;	SDRD	R0:R1 = LBA, R2 = 512-byte buffer; reads one block
+;		-> R0 = 0 ok / nonzero error   (preserves R4/R5)
+;	SDWR	R0:R1 = LBA, R2 = 512-byte buffer; writes one block
+;		-> R0 = 0 ok / nonzero error   (preserves R4/R5)
+;
+; Read + init are hardware-verified (reads a formatted card's MBR).
+; The write path is coded but NOT yet exercised on hardware.
+
+VIAORB	= 174000		; VIA ORB/IRB - port B data
+VIADRB	= 174004		; VIA DDRB - direction, 1 = output
+
+SDCS	= 010			; PB3
+SDSCK	= 020			; PB4
+SDMOSI	= 040			; PB5
+SDMISO	= 100			; PB6
+
+; ---- SPI line setup + primitives ------------------------------------
+
+SDPORT:	BIS	#SDCS, @#VIAORB		; CS idle high (deselected)
+	BIC	#SDSCK!SDMOSI, @#VIAORB	; clock idles low, MOSI low
+	BIS	#SDCS!SDSCK!SDMOSI, @#VIADRB
+	BIC	#SDMISO, @#VIADRB	; MISO is the input
+	RTS	PC
+
+SDCSL:	BIC	#SDCS, @#VIAORB
+	RTS	PC
+SDCSH:	BIS	#SDCS, @#VIAORB
+	RTS	PC
+
+; exchange one byte, R0 out -> R0 in, MSB first (mode 0: sample before
+; the rising edge, advance on the fall)
+
+SDXFR:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	CLR	R3
+	MOV	#^D8, R2
+SDXF1:	ASL	R3
+	BIT	#200, R0		; drive MOSI = current MSB
+	BEQ	SDXF2
+	BIS	#SDMOSI, @#VIAORB
+	BR	SDXF3
+SDXF2:	BIC	#SDMOSI, @#VIAORB
+SDXF3:	BIT	#SDMISO, @#VIAORB	; sample DO
+	BEQ	SDXF4
+	INC	R3
+SDXF4:	BIS	#SDSCK, @#VIAORB	; rising edge
+	BIC	#SDSCK, @#VIAORB	; falling edge
+	ASL	R0
+	SOB	R2, SDXF1
+	MOV	R3, R0
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+; send 377 (idle line) and return what came back -> R0
+
+SDIDLE:	MOV	#377, R0
+	JSR	PC, SDXFR
+	RTS	PC
+
+; ---- send a command: R0 = command index (0..63), R1:HI/LO arg -------
+; The argument is taken from CMDARG (4 bytes, big-endian on the wire).
+; Returns R1 (the R1 response byte) in R0. CS is left LOW (caller ends
+; the transaction) so read/write can keep clocking.
+
+SDCMD:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	BIS	#100, R0		; command byte: start bits 01xxxxxx
+	MOV	R0, R3			; stash it - the priming SDIDLE below
+	JSR	PC, SDCSL		; returns a byte in R0, clobbering it
+	JSR	PC, SDIDLE		; a priming clock before the command
+	MOV	R3, R0			; restore the command byte
+	JSR	PC, SDXFR
+	MOVB	CMDARG+0, R0		; argument, MSB first
+	JSR	PC, SDXFR
+	MOVB	CMDARG+1, R0
+	JSR	PC, SDXFR
+	MOVB	CMDARG+2, R0
+	JSR	PC, SDXFR
+	MOVB	CMDARG+3, R0
+	JSR	PC, SDXFR
+	MOVB	CMDCRC, R0		; CRC (only real for CMD0/CMD8)
+	JSR	PC, SDXFR
+	MOV	#^D16, R2		; poll up to 16 bytes for the response
+SDCM1:	JSR	PC, SDIDLE		; (R1 has bit 7 = 0)
+	BIT	#200, R0
+	BEQ	SDCM2
+	SOB	R2, SDCM1
+SDCM2:	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- init ladder -> R0 = 0 ok / error code --------------------------
+
+SDINI:	JSR	PC, SDPORT
+	JSR	PC, SDCSH		; wake: >=74 clocks with CS HIGH
+	MOV	#^D10, R3		; 10*8 = 80 idle clocks
+SDIN0:	JSR	PC, SDIDLE
+	SOB	R3, SDIN0
+
+	MOV	#^D8, R4		; a few tries at CMD0
+SDIN1:	JSR	PC, SDARG0		; arg = 0
+	MOVB	#225, CMDCRC		; CMD0 CRC = 0x95
+	CLR	R0			; CMD0 GO_IDLE_STATE
+	JSR	PC, SDCMD
+	JSR	PC, SDCSH
+	CMP	R0, #1			; expect idle (0x01)
+	BEQ	SDIN2
+	CMP	R0, #377		; 0xFF = no response at all
+	BNE	SDIN1B
+	DEC	R4
+	BGT	SDIN1
+	MOV	#1, R0			; no card
+	RTS	PC
+SDIN1B:	DEC	R4
+	BGT	SDIN1
+	MOV	#2, R0			; answered but never idle
+	RTS	PC
+
+SDIN2:	MOV	#652, R0		; CMD8 arg = 0x000001AA (652 = 0x1AA)
+	CLR	R1
+	JSR	PC, SDLBA
+	MOVB	#207, CMDCRC		; CMD8 CRC = 0x87
+	MOV	#^D8, R0		; CMD8 SEND_IF_COND
+	JSR	PC, SDCMD
+	MOV	R0, R3			; save R1
+	; CMD8 returns R1 + a 4-byte trailing field; the last byte
+	; echoes 0xAA, the byte before it is the voltage nibble (0x01)
+	JSR	PC, SDIDLE
+	JSR	PC, SDIDLE
+	JSR	PC, SDIDLE
+	JSR	PC, SDIDLE
+	MOV	R0, R5			; 4th byte = echo of 0xAA
+	JSR	PC, SDCSH
+	BIT	#4, R3			; illegal-command bit set = v1 card
+	BNE	SDIN3			; (accept; treat as no-HCS below)
+	CMP	R5, #252		; must echo 0xAA (252 = 0xAA)
+	BEQ	SDIN3
+	MOV	#3, R0			; bad voltage / not understood
+	RTS	PC
+
+SDIN3:	MOV	#^D8000, R3		; ACMD41 loop (init can take a while)
+SDIN4:	JSR	PC, SDARG0		; CMD55 (APP_CMD), arg 0
+	CLRB	CMDCRC
+	MOV	#^D55, R0
+	JSR	PC, SDCMD
+	JSR	PC, SDCSH
+	CLR	R0			; ACMD41 arg = HCS -> 0x40000000
+	MOV	#40000, R1		; high half = 0x4000
+	JSR	PC, SDLBA
+	CLRB	CMDCRC
+	MOV	#^D41, R0		; ACMD41 SD_SEND_OP_COND
+	JSR	PC, SDCMD
+	JSR	PC, SDCSH
+	TST	R0			; 0 = init complete
+	BEQ	SDIN5
+	DEC	R3
+	BGT	SDIN4
+	MOV	#4, R0			; ACMD41 timeout
+	RTS	PC
+
+SDIN5:	JSR	PC, SDARG0		; CMD58 READ_OCR -> capacity class
+	CLRB	CMDCRC
+	MOV	#^D58, R0
+	JSR	PC, SDCMD
+	MOVB	R0, R3			; R1
+	JSR	PC, SDIDLE		; OCR byte 1 (bit 6 = CCS = block addr)
+	MOV	R0, CCS
+	JSR	PC, SDIDLE
+	JSR	PC, SDIDLE
+	JSR	PC, SDIDLE
+	JSR	PC, SDCSH
+	CLR	R0			; success
+	RTS	PC
+
+; helper: CMDARG = 0
+
+SDARG0:	CLR	CMDARG+0
+	CLR	CMDARG+2
+	RTS	PC
+
+; ---- stage the 32-bit LBA (R0 = low, R1 = high) into CMDARG ---------
+; SD command args are big-endian: CMDARG+0 = MSB. For a block-addressed
+; card the arg IS the sector number.
+
+SDLBA:	MOVB	R1, CMDARG+1		; bits 23..16
+	SWAB	R1
+	MOVB	R1, CMDARG+0		; bits 31..24
+	MOVB	R0, CMDARG+3		; bits 7..0
+	SWAB	R0
+	MOVB	R0, CMDARG+2		; bits 15..8
+	RTS	PC
+
+; ---- read one 512-byte block: R0:R1 = LBA, R2 = buffer -------------
+
+SDRD:	MOV	R2, -(SP)
+	JSR	PC, SDLBA
+	CLRB	CMDCRC
+	MOV	#^D17, R0		; CMD17 READ_SINGLE_BLOCK
+	JSR	PC, SDCMD
+	TST	R0			; R1 must be 0
+	BNE	SDRDER
+	MOV	#^D20000, R3		; wait for the data token 0xFE
+SDRD1:	JSR	PC, SDIDLE
+	CMP	R0, #376
+	BEQ	SDRD2
+	CMP	R0, #377		; keep waiting while line idles high
+	BNE	SDRDER
+	SOB	R3, SDRD1
+	BR	SDRDER
+SDRD2:	MOV	(SP), R2		; buffer
+	MOV	#^D512, R3
+SDRD3:	JSR	PC, SDIDLE
+	MOVB	R0, (R2)+
+	SOB	R3, SDRD3
+	JSR	PC, SDIDLE		; discard the two CRC bytes
+	JSR	PC, SDIDLE
+	JSR	PC, SDCSH
+	JSR	PC, SDIDLE		; trailing clocks so the card releases
+	CLR	R0
+	TST	(SP)+
+	RTS	PC
+SDRDER:	JSR	PC, SDCSH
+	MOV	#1, R0
+	TST	(SP)+
+	RTS	PC
+
+; ---- write one 512-byte block: R0:R1 = LBA, R2 = buffer ------------
+
+SDWR:	MOV	R2, -(SP)
+	JSR	PC, SDLBA
+	CLRB	CMDCRC
+	MOV	#^D24, R0		; CMD24 WRITE_BLOCK
+	JSR	PC, SDCMD
+	TST	R0
+	BNE	SDWRER
+	JSR	PC, SDIDLE		; one gap byte before the data token
+	MOV	#376, R0		; data token 0xFE
+	JSR	PC, SDXFR
+	MOV	(SP), R2
+	MOV	#^D512, R3
+SDWR1:	MOVB	(R2)+, R0
+	BIC	#177400, R0
+	JSR	PC, SDXFR
+	SOB	R3, SDWR1
+	JSR	PC, SDIDLE		; two dummy CRC bytes
+	JSR	PC, SDIDLE
+	JSR	PC, SDIDLE		; data-response token
+	BIC	#177340, R0		; mask to the 5 status bits
+	CMP	R0, #5			; 0b00101 = data accepted
+	BNE	SDWRER
+	MOV	#^D30000, R3		; card holds DO low while busy
+SDWR2:	JSR	PC, SDIDLE
+	CMP	R0, #377
+	BEQ	SDWR3
+	SOB	R3, SDWR2
+	BR	SDWRER
+SDWR3:	JSR	PC, SDCSH
+	JSR	PC, SDIDLE
+	CLR	R0
+	TST	(SP)+
+	RTS	PC
+SDWRER:	JSR	PC, SDCSH
+	MOV	#1, R0
+	TST	(SP)+
+	RTS	PC
+
+; ---- state -----------------------------------------------------------
+
+	.EVEN
+CMDARG:	.BLKB	4		; command argument, big-endian on the wire
+CMDCRC:	.BYTE	0		; CRC byte for the current command
+	.EVEN
+CCS:	.WORD	0		; OCR byte with the CCS (block-address) bit

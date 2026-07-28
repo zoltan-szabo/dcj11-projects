@@ -18,6 +18,7 @@ MACRO-11 projects for the DCJ-11 SBC and Multi IO card by Peter Schranz
 | `spi/` | Software (bit-banged) SPI master on VIA port B (mode 0, MSB first) |
 | `net-discovery/` | The Ethernet bring-up campaign (archived): ENC28J60 (shelved — rotates SPI reads) and W5500, up to a ping-answering, telnet-able PDP-11. See HISTORY |
 | `netmon/` | The living network project: an ODT-style monitor served over a TCP/SLU mirrored console (`telnet 10.1.0.199` / `nc`) — examine/deposit/go, trap CATCH, W5500 |
+| `sdcard/` | Raw microSD driver over SPI (VIA port B): init ladder + 512-byte sector read/write, plus a sector-0 dump test. No filesystem yet |
 
 ## Toolchain
 

@@ -1,0 +1,213 @@
+; sdtest.mac — SD card bring-up: init, then hex-dump sector 0
+;
+; Runs the init ladder and prints the result; on success reads LBA 0 and
+; dumps all 512 bytes as hex, 16 per line with the offset. A formatted
+; card shows the MBR here: the partition table near the end and the
+; boot signature 55 AA at offset 0x1FE (the last two bytes).
+;
+; It first runs PROBE — a hand-coded CMD0 that dumps the raw MISO reply
+; — before the init ladder, so a wiring/power fault is visible even when
+; the ladder cannot start. Keep it: it pinpointed the SDCMD R0-clobber
+; bug in one run.
+;
+; Wiring: see sd.mac (PB3 CS, PB4 SCK, PB5 MOSI, PB6 MISO; 3.3 V card on
+; a breakout module with a regulator + level shifter, fed from 5 V).
+;
+; Assemble:	part of sdtest.prj (origin 1000); run with P or 1000G.
+
+.	= 1000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+
+START:	MOV	#340, @#177776	; priority 7
+	MOV	#1000, SP
+	MOV	#MHELLO, R1
+	JSR	PC, PMSG
+
+	JSR	PC, PROBE	; raw CMD0 byte dump, before the init ladder
+
+	JSR	PC, SDINI
+	MOV	R0, R4
+	MOV	#MINIT, R1
+	JSR	PC, PMSG
+	MOV	R4, R0		; the init result code, one octal digit
+	ADD	#60, R0
+	JSR	PC, PUTC
+	JSR	PC, PCRLF
+	TST	R4
+	BEQ	OKINIT
+	MOV	#MFAIL, R1	; error codes are documented in sd.mac
+	JSR	PC, PMSG
+	HALT
+
+OKINIT:	MOV	#MCCS, R1	; capacity class from the OCR byte
+	JSR	PC, PMSG
+	MOV	CCS, R0
+	JSR	PC, PHEX2
+	BIT	#100, CCS	; CCS bit (0x40) set = block-addressed
+	BEQ	BYTEAD
+	MOV	#MBLOCK, R1
+	BR	CCPRT
+BYTEAD:	MOV	#MBYTE, R1
+CCPRT:	JSR	PC, PMSG
+
+	CLR	R0		; read sector 0 (LBA 0)
+	CLR	R1
+	MOV	#SECBUF, R2
+	JSR	PC, SDRD
+	TST	R0
+	BEQ	DUMP
+	MOV	#MRDER, R1
+	JSR	PC, PMSG
+	HALT
+
+DUMP:	MOV	#MDUMP, R1
+	JSR	PC, PMSG
+	MOV	#SECBUF, R4	; running pointer
+	CLR	R5		; offset
+DLINE:	MOV	R5, R0		; offset, 4 hex digits
+	JSR	PC, PHEX4
+	MOV	#72, R0		; ':'
+	JSR	PC, PUTC
+	MOV	#40, R0
+	JSR	PC, PUTC
+	MOV	#^D16, R3	; 16 bytes per line
+DBYTE:	MOVB	(R4)+, R0
+	BIC	#177400, R0
+	JSR	PC, PHEX2
+	MOV	#40, R0
+	JSR	PC, PUTC
+	SOB	R3, DBYTE
+	JSR	PC, PCRLF
+	ADD	#^D16, R5
+	CMP	R5, #^D512
+	BLO	DLINE
+
+	MOV	#MDONE, R1
+	JSR	PC, PMSG
+	HALT
+	BR	START
+
+; ---- raw probe: wake the card, send CMD0 by hand, dump 8 replies ----
+; Reads the SPI bus directly so we can see what (if anything) the card
+; drives on MISO. On a good card you get some FF (thinking) then 01
+; (idle), e.g. "FF FF 01 FF ...". Diagnostic reading of the 8 bytes:
+;   all FF        -> card silent: power (3.3V?), CS/SCK/MOSI not reaching
+;                    it (level shift?), or MISO/PB6 not wired
+;   all 00        -> MISO stuck LOW: shorted, or reading the wrong pin
+;   garbage/mixed -> clock/level marginal, or MOSI/SCK swapped
+
+PROBE:	MOV	#MPROBE, R1
+	JSR	PC, PMSG
+	JSR	PC, SDPORT
+	JSR	PC, SDCSH	; >=80 wake clocks, CS high
+	MOV	#^D10, R3
+PRB0:	JSR	PC, SDIDLE
+	SOB	R3, PRB0
+	JSR	PC, SDCSL	; select, send CMD0 by hand
+	JSR	PC, SDIDLE
+	MOV	#100, R0	; 0x40 = CMD0
+	JSR	PC, SDXFR
+	CLR	R0
+	JSR	PC, SDXFR	; arg byte 0
+	CLR	R0
+	JSR	PC, SDXFR
+	CLR	R0
+	JSR	PC, SDXFR
+	CLR	R0
+	JSR	PC, SDXFR	; arg byte 3
+	MOV	#225, R0	; CRC 0x95
+	JSR	PC, SDXFR
+	MOV	#^D8, R3	; dump 8 response bytes
+PRB1:	JSR	PC, SDIDLE
+	JSR	PC, PHEX2
+	MOV	#40, R0
+	JSR	PC, PUTC
+	SOB	R3, PRB1
+	JSR	PC, SDCSH
+	JSR	PC, PCRLF
+	RTS	PC
+
+; ---- console ---------------------------------------------------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMSG2
+	JSR	PC, PUTC
+	BR	PMSG
+PMSG2:	RTS	PC
+
+PCRLF:	MOV	#15, R0
+	JSR	PC, PUTC
+	MOV	#12, R0
+	JSR	PC, PUTC
+	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+; print R0 low byte as two hex digits (high nibble first)
+
+PHEX2:	BIC	#177400, R0	; low byte only
+	MOV	R0, -(SP)
+	ASR	R0		; high nibble down into bits 0-3
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	JSR	PC, PNIB
+	MOV	(SP)+, R0	; low nibble (PNIB masks it)
+	JSR	PC, PNIB
+	RTS	PC
+
+; print R0 low word as four hex digits
+
+PHEX4:	MOV	R0, -(SP)
+	SWAB	R0		; high byte into the low position
+	JSR	PC, PHEX2
+	MOV	(SP)+, R0
+	JSR	PC, PHEX2	; low byte
+	RTS	PC
+
+; print the low nibble of R0 as one hex digit
+
+PNIB:	BIC	#177760, R0
+	CMP	R0, #^D9
+	BGT	PNIBA
+	ADD	#60, R0		; 0-9
+	BR	PNIBP
+PNIBA:	ADD	#^D55, R0	; A-F  (10 -> 'A' = 0x41; 0x41-10 = 55.)
+PNIBP:	JSR	PC, PUTC
+	RTS	PC
+
+; ---- messages and buffer --------------------------------------------
+
+MHELLO:	.ASCII	/SDTEST/
+	.BYTE	15, 12, 0
+MPROBE:	.ASCII	/CMD0 REPLY: /
+	.BYTE	0
+MINIT:	.ASCII	/INIT CODE /
+	.BYTE	0
+MFAIL:	.ASCII	/INIT FAILED - SEE SD.MAC CODES/
+	.BYTE	15, 12, 0
+MCCS:	.ASCII	/OCR HI /
+	.BYTE	0
+MBLOCK:	.ASCII	/ = SDHC BLOCK-ADDRESSED/
+	.BYTE	15, 12, 0
+MBYTE:	.ASCII	/ = SDSC BYTE-ADDRESSED/
+	.BYTE	15, 12, 0
+MRDER:	.ASCII	/SECTOR 0 READ FAILED/
+	.BYTE	15, 12, 0
+MDUMP:	.ASCII	/SECTOR 0:/
+	.BYTE	15, 12, 0
+MDONE:	.ASCII	/DONE/
+	.BYTE	15, 12, 0
+	.EVEN
+
+SECBUF:	.BLKB	^D512
+	.EVEN
+
+	.INCLUDE "sd.mac"
+
+	.END	START
