@@ -151,6 +151,47 @@ FMRS:	CLC
 	ADC	R1
 	MOV	R0, DATALBA
 	MOV	R1, DATALBA+2
+
+	MOV	#FATBUF+23, R1		; total sectors: 16-bit at 0x13,
+	JSR	PC, RDW			;   or, if that is 0, 32-bit at 0x20
+	TST	R0
+	BEQ	FMTS32
+	MOV	R0, TOTSEC
+	CLR	TOTSEC+2
+	BR	FMCC
+FMTS32:	MOV	#FATBUF+40, R1		; 0x20 (low word)
+	JSR	PC, RDW
+	MOV	R0, TOTSEC
+	MOV	#FATBUF+42, R1		; 0x22 (high word)
+	JSR	PC, RDW
+	MOV	R0, TOTSEC+2
+
+FMCC:	MOV	DATALBA, R0		; data offset = dataStart - partStart
+	MOV	DATALBA+2, R1
+	SUB	PSTART, R0
+	SBC	R1
+	SUB	PSTART+2, R1
+	MOV	TOTSEC, R2		; data sectors = totalSec - data offset
+	MOV	TOTSEC+2, R3		;   R3:R2 = dataSectors (R3 high, R2 low)
+	SUB	R0, R2
+	SBC	R3
+	SUB	R1, R3
+	MOV	SPCLUS, R4		; k = log2(sectorsPerCluster)
+	CLR	R5			;   (SPCLUS is always a power of two)
+FMCK:	CMP	R4, #1
+	BLOS	FMCSH
+	ASR	R4
+	INC	R5
+	BR	FMCK
+FMCSH:	TST	R5			; countOfClusters = dataSectors >> k
+	BEQ	FMCDN
+FMCS1:	CLC
+	ROR	R3
+	ROR	R2
+	DEC	R5
+	BNE	FMCS1
+FMCDN:	MOV	R2, MAXCLUS		; FAT16 count fits the low word
+	INC	MAXCLUS			; clusters run 2 .. count+1
 	CLR	R0
 	RTS	PC
 
@@ -477,11 +518,10 @@ FWEER:	MOV	#1, R0
 
 ; ---- find a free cluster -> R0 = cluster number, or 0 if none -------
 ; Scans the FAT a sector at a time (256 entries each) for a 0x0000
-; entry, skipping the two reserved entries. Uses FATBUF (invalidates the
-; dir cache). NOTE: bounded only by the FAT size, not the true cluster
-; count, so on a full volume it could return an entry past the last real
-; cluster; fine for a mostly-empty card. Proper bounding waits for the
-; totalSectors-based cluster count when file creation lands.
+; entry, skipping the two reserved entries, and stops at MAXCLUS (the
+; last real cluster, computed at mount from totalSectors) so it never
+; hands back an entry past the end of the data region on a full volume.
+; Uses FATBUF (invalidates the dir cache).
 
 FATFREE:CLR	R4			; FAT sector index
 FFR1:	CMP	R4, SPFAT
@@ -506,6 +546,8 @@ FFR2:	TST	(R2)			; free (0x0000)?
 FFRGOT:	MOV	R4, R0			; cluster = sector*256 + index
 	SWAB	R0
 	ADD	R3, R0
+	CMP	R0, MAXCLUS		; past the last real cluster?
+	BHI	FFRNONE			; yes -> the volume is full
 	RTS	PC
 FFR3:	ADD	#2, R2
 	INC	R3
@@ -1032,6 +1074,8 @@ NFATS:	.WORD	0		; number of FATs
 RENTC:	.WORD	0		; root entry count
 SPFAT:	.WORD	0		; sectors per FAT
 RDSEC:	.WORD	0		; root-directory sectors
+TOTSEC:	.WORD	0, 0		; total sectors in the volume
+MAXCLUS:.WORD	0		; highest valid cluster number (count + 1)
 DMODE:	.WORD	0		; iterator: 0 = root, 1 = subdirectory
 DSTART:	.WORD	0		; subdirectory's first cluster
 DCLUS:	.WORD	0		; cluster now being read (subdir mode)

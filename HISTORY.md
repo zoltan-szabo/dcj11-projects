@@ -3,6 +3,26 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: FAT16 free-cluster bound + a DIV gotcha (2026-07-29)
+
+FATFREE was bounded only by the FAT's size in sectors, so on a full
+volume it could hand back a cluster past the end of the data region (the
+FAT is padded to whole sectors and has more entries than there are real
+clusters). FATMNT now reads totalSectors (16-bit at 0x13, else 32-bit at
+0x20), computes countOfClusters = (totalSectors - dataOffset) / spc, and
+stores MAXCLUS = count + 1; FATFREE refuses any candidate above it. The
+gotcha: the first cut used the EIS DIV and fatgtest printed a cluster
+count of 0x3B for a 2 GB card - which is exactly the high word of the
+0x003B9AD0 total, i.e. the divide behaved like /0x10000. Rather than
+chase the DIV operand/register-pair semantics, switched to a shift:
+sectorsPerCluster is always a power of two, so count = dataSectors >>
+log2(spc), done with the same CLC/ROR 32-bit shift idiom already used
+for rootDirSec. fatgtest then read totalSec 0x003B9AD0, spc 0x40, count
+0xEE63 - a valid FAT16 count (~2 GB / 32 KB). The added print of
+sectors/cluster is what made the DIV bug obvious. The full-volume
+refusal itself can't be exercised without filling the card, so it is
+code-correct but not hardware-tested; the normal in-range path is.
+
 ## sdcard: FAT16 nested directories (2026-07-29)
 
 FATMKD and FATRMD got the same wrapper/core split as the file ops, so a

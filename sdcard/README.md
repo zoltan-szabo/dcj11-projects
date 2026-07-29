@@ -90,6 +90,7 @@ builds one test program on top of `sd.mac` / `fat16.mac`.
 | `fatrtest.prj`| FAT16 **remove directory**: `FATMKD` `RMDIR`, inject an entry so it's non-empty and confirm `FATRMD` refuses (code 3), clear it, then remove the empty dir (self-cleaning) |
 | `fatstest.prj`| FAT16 **subdirectory writes**: make `SUBDIR`, then inside it create `INSIDE.TXT` (verify data + not in root), rename it, delete it, and remove the empty dir (self-cleaning) |
 | `fat2test.prj`| FAT16 **nested directories**: make `TOP`, then `NESTED` inside it, check `NESTED`'s `..` points at `TOP`'s cluster, then remove both (self-cleaning) |
+| `fatgtest.prj`| FAT16 **geometry + free-cluster bound**: print total sectors, sectors/cluster and the computed cluster count, then check `FATFREE` returns an in-range cluster (read-only) |
 
 ## Using it
 
