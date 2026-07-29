@@ -3,6 +3,19 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: sector write verified (2026-07-29)
+
+`sdwtest.mac` exercises sd.mac's SDWR (untested until now) safely:
+writes a position-dependent pattern (byte[i] = (i+0x11) & 0xFF) to
+scratch LBA 100 — in the MBR gap, before the partition at LBA 2048, so
+it can't touch the FAT volume — reads it back into a 0xEE-poisoned
+buffer (so a no-op read can't fake success), and compares. It saves the
+original sector first and writes it back at the end. Hardware result:
+"WRITE VERIFIED - 512 BYTES MATCH" on the first run. The block layer
+(init + read + write) is now fully verified; the FAT16 write ladder is
+unblocked (overwrite-in-place, then create/extend with cluster
+allocation + FAT/dir updates, then delete).
+
 ## sdcard: FAT16 subdirectory descent (2026-07-28)
 
 Generalised the directory iterator to walk any directory, not just the

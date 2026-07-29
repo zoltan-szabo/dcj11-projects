@@ -5,11 +5,12 @@ ladder and 512-byte sector read/write over the W65C22S VIA — plus a
 read-only FAT16 layer on top (mount, walk the directory tree including
 subdirectories, read files by following the cluster chain).
 
-**Status:** init + sector **read** and **read-only FAT16** (root *and*
-subdirectories) are hardware-verified — the PDP-11 mounts a formatted
-card, recursively walks the directory tree, and dumps a file's
-contents. The sector **write** path is coded but not yet exercised; FAT
-is read-only (no create/write) and 8.3 names only (long names skipped).
+**Status:** the raw block layer (init + sector **read** and **write**)
+and **read-only FAT16** (root *and* subdirectories) are all
+hardware-verified — the PDP-11 mounts a formatted card, recursively
+walks the directory tree, dumps a file, and round-trips a sector write
+through a scratch LBA. FAT is still read-only (no create/write yet) and
+8.3 names only (long names skipped).
 
 ## Wiring (VIA port B)
 
@@ -36,6 +37,9 @@ A bare passive adapter would need external 3.3 V + level shifting.
 - `sdtest.mac` — bring-up: a raw-CMD0 `PROBE` (dumps the MISO reply for
   wiring diagnosis), then init, capacity class, and a full hex-dump of
   sector 0.
+- `sdwtest.mac` — write test: pattern → scratch LBA 100 (in the MBR gap,
+  outside the FAT volume) → read back → verify; saves and restores the
+  original sector.
 - `fat16.mac` — read-only FAT16 on top of `sd.mac`: `FATMNT` (read MBR +
   BPB, compute geometry), a directory iterator (`FATNXT`) that walks the
   root or any subdirectory (`FATDIR0` / `FATCD` / `FATREW`), and file
@@ -44,7 +48,8 @@ A bare passive adapter would need external 3.3 V + level shifting.
 - `fattest.mac` — FAT bring-up: mount, print geometry, recursively walk
   the directory tree (indented, with sizes; depth/entry capped), then
   open and dump the first regular file as text.
-- `sdtest.prj` / `fattest.prj` — J11Terminal projects (origin 1000).
+- `sdtest.prj` / `fattest.prj` / `sdwtest.prj` — J11Terminal projects
+  (origin 1000).
 
 ## Using it
 
