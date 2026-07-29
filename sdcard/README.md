@@ -5,6 +5,9 @@ ladder and 512-byte sector read/write over the W65C22S VIA — plus a
 read-only FAT16 layer on top (mount, walk the directory tree including
 subdirectories, read files by following the cluster chain).
 
+<img width="60%" height="60%" alt="image" src="https://github.com/user-attachments/assets/5d9f19f4-d323-410b-b69a-fd54c3a67a28" />
+
+
 **Status:** the raw block layer (init + sector **read**/**write**) and
 FAT16 (mount, walk root *and* subdirectories, read files, and
 **overwrite a file in place**) are all hardware-verified — the PDP-11
