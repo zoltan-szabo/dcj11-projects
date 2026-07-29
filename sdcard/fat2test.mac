@@ -1,0 +1,275 @@
+; fat2test.mac — FAT16 nested-directory test (FATMKDC / FATRMDC)
+;
+; Makes TOP in the root, then NESTED inside TOP. Verifies NESTED is a
+; directory and that its ".." entry points at TOP's cluster (not the
+; root) - the parent-cluster fix. Then removes NESTED (FATRMDC, with its
+; emptiness guard) and TOP. Self-cleaning and re-runnable.
+;
+; Assemble:	part of fat2test.prj (origin 1000); run with P or 1000G.
+
+.	= 1000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+
+START:	MOV	#340, @#177776	; priority 7
+	MOV	#1000, SP
+	MOV	#MHELLO, R1
+	JSR	PC, PMSG
+
+	JSR	PC, SDINI
+	TST	R0
+	BEQ	MOUNT
+	MOV	#MNOSD, R1
+	JSR	PC, PMSG
+	HALT
+MOUNT:	JSR	PC, FATMNT
+	TST	R0
+	BEQ	CLEAN0
+	MOV	#MNOMNT, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- remove any leftover from a prior run ---------------------------
+
+CLEAN0:	JSR	PC, FATDIR0
+	MOV	#TOPNAM, R1
+	JSR	PC, FATOPN
+	TST	R0
+	BNE	MK		; no leftover TOP
+	MOV	DECLUS, TOPCLUS
+	MOV	TOPCLUS, R0
+	JSR	PC, FATCD
+	MOV	#NESTNAM, R1
+	JSR	PC, FATRMDC	; remove leftover NESTED (ignore result)
+	JSR	PC, FATDIR0
+	MOV	#TOPNAM, R1
+	JSR	PC, FATRMD	; remove leftover TOP
+
+; ---- make TOP in the root -------------------------------------------
+
+MK:	MOV	#TOPNAM, R1
+	JSR	PC, FATMKD
+	TST	R0
+	BEQ	MK1
+	MOV	#MTOPER, R1
+	JSR	PC, PMSG
+	HALT
+MK1:	MOV	#TOPNAM, R1	; save TOP's cluster
+	JSR	PC, FATOPN
+	MOV	DECLUS, TOPCLUS
+	MOV	#MTOP, R1
+	JSR	PC, PMSG
+	MOV	TOPCLUS, R0
+	JSR	PC, PHEX4
+	JSR	PC, PCRLF
+
+; ---- make NESTED inside TOP -----------------------------------------
+
+	MOV	TOPCLUS, R0
+	JSR	PC, FATCD	; make TOP current
+	MOV	#NESTNAM, R1
+	JSR	PC, FATMKDC
+	MOV	R0, R4
+	TST	R4
+	BEQ	MK2
+	MOV	#MNSTER, R1
+	JSR	PC, PMSG
+	MOV	R4, R0
+	ADD	#60, R0
+	JSR	PC, PUTC
+	JSR	PC, PCRLF
+	HALT
+MK2:	MOV	#MNST, R1
+	JSR	PC, PMSG
+
+; ---- verify NESTED is a directory in TOP ----------------------------
+
+	MOV	TOPCLUS, R0
+	JSR	PC, FATCD
+	MOV	#NESTNAM, R1
+	JSR	PC, FATOPN
+	TST	R0
+	BEQ	V1
+	MOV	#MNONST, R1
+	JSR	PC, PMSG
+	HALT
+V1:	BIT	#20, DEATTR	; 0x10 = directory
+	BNE	V2
+	MOV	#MNOTD, R1
+	JSR	PC, PMSG
+	HALT
+V2:	MOV	DECLUS, NSTCLUS
+
+; ---- descend and check ".." points at TOP ---------------------------
+
+	MOV	NSTCLUS, R0
+	JSR	PC, FATCD	; make NESTED current
+	JSR	PC, FATNXT	; "."
+	TST	R0
+	BNE	DOTBAD
+	CLR	R0
+	BISB	DENAME, R0
+	CMP	R0, #56
+	BNE	DOTBAD
+	JSR	PC, FATNXT	; ".."
+	TST	R0
+	BNE	DOTBAD
+	CLR	R0
+	BISB	DENAME, R0
+	CMP	R0, #56
+	BNE	DOTBAD
+	CLR	R0		; ".." second char must also be '.'
+	BISB	DENAME+1, R0
+	CMP	R0, #56
+	BNE	DOTBAD
+	MOV	#MDOTDOT, R1	; ".." cluster should equal TOPCLUS
+	JSR	PC, PMSG
+	MOV	DECLUS, R0
+	JSR	PC, PHEX4
+	JSR	PC, PCRLF
+	CMP	DECLUS, TOPCLUS
+	BEQ	PAROK
+	MOV	#MPARNO, R1
+	JSR	PC, PMSG
+	HALT
+PAROK:	MOV	#MPAROK, R1
+	JSR	PC, PMSG
+	BR	RMN
+DOTBAD:	MOV	#MDOTNO, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- remove NESTED, then TOP ----------------------------------------
+
+RMN:	MOV	TOPCLUS, R0
+	JSR	PC, FATCD
+	MOV	#NESTNAM, R1
+	JSR	PC, FATRMDC	; remove NESTED from TOP
+	TST	R0
+	BEQ	RMN1
+	MOV	#MRMNER, R1
+	JSR	PC, PMSG
+	HALT
+RMN1:	MOV	TOPCLUS, R0	; gone from TOP?
+	JSR	PC, FATCD
+	MOV	#NESTNAM, R1
+	JSR	PC, FATOPN
+	TST	R0
+	BNE	RMN2
+	MOV	#MNSTST, R1
+	JSR	PC, PMSG
+	HALT
+RMN2:	MOV	#MRMN, R1
+	JSR	PC, PMSG
+
+	JSR	PC, FATDIR0
+	MOV	#TOPNAM, R1
+	JSR	PC, FATRMD	; remove TOP from the root
+	TST	R0
+	BEQ	DONE
+	MOV	#MRMTER, R1
+	JSR	PC, PMSG
+	HALT
+DONE:	MOV	#MDONE, R1
+	JSR	PC, PMSG
+	HALT
+	JMP	START
+
+; ---- console ---------------------------------------------------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMSG2
+	JSR	PC, PUTC
+	BR	PMSG
+PMSG2:	RTS	PC
+
+PCRLF:	MOV	#15, R0
+	JSR	PC, PUTC
+	MOV	#12, R0
+	JSR	PC, PUTC
+	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+PHEX4:	MOV	R0, -(SP)
+	SWAB	R0
+	JSR	PC, PHEX2
+	MOV	(SP)+, R0
+	JSR	PC, PHEX2
+	RTS	PC
+
+PHEX2:	BIC	#177400, R0
+	MOV	R0, -(SP)
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	JSR	PC, PNIB
+	MOV	(SP)+, R0
+	JSR	PC, PNIB
+	RTS	PC
+
+PNIB:	BIC	#177760, R0
+	CMP	R0, #^D9
+	BGT	PNA
+	ADD	#60, R0
+	BR	PNP
+PNA:	ADD	#^D55, R0
+PNP:	JSR	PC, PUTC
+	RTS	PC
+
+; ---- names and messages ---------------------------------------------
+
+TOPNAM:	.ASCII	/TOP        /	; 8.3: TOP + 8 spaces
+NESTNAM:.ASCII	/NESTED     /	; NESTED + 5 spaces
+	.EVEN
+
+MHELLO:	.ASCII	/FAT2TEST - nested directories (TOP then NESTED)/
+	.BYTE	15, 12, 0
+MNOSD:	.ASCII	/SD INIT FAILED/
+	.BYTE	15, 12, 0
+MNOMNT:	.ASCII	/MOUNT FAILED/
+	.BYTE	15, 12, 0
+MTOPER:	.ASCII	/MKDIR TOP FAILED/
+	.BYTE	15, 12, 0
+MTOP:	.ASCII	/CREATED TOP, cluster /
+	.BYTE	0
+MNSTER:	.ASCII	/MKDIR NESTED FAILED, CODE /
+	.BYTE	0
+MNST:	.ASCII	/CREATED NESTED INSIDE TOP/
+	.BYTE	15, 12, 0
+MNONST:	.ASCII	/NESTED NOT FOUND IN TOP/
+	.BYTE	15, 12, 0
+MNOTD:	.ASCII	/NESTED IS NOT A DIRECTORY/
+	.BYTE	15, 12, 0
+MDOTDOT:.ASCII	/NESTED .. cluster = /
+	.BYTE	0
+MPAROK:	.ASCII	/.. POINTS AT TOP - OK/
+	.BYTE	15, 12, 0
+MPARNO:	.ASCII	/.. DOES NOT POINT AT TOP/
+	.BYTE	15, 12, 0
+MDOTNO:	.ASCII	/MISSING . / .. ENTRIES/
+	.BYTE	15, 12, 0
+MRMNER:	.ASCII	/RMDIR NESTED FAILED/
+	.BYTE	15, 12, 0
+MNSTST:	.ASCII	/NESTED STILL IN TOP/
+	.BYTE	15, 12, 0
+MRMN:	.ASCII	/REMOVED NESTED/
+	.BYTE	15, 12, 0
+MRMTER:	.ASCII	/RMDIR TOP FAILED/
+	.BYTE	15, 12, 0
+MDONE:	.ASCII	/--- DONE (nested make + remove, card clean)/
+	.BYTE	15, 12, 0
+	.EVEN
+
+TOPCLUS:.WORD	0
+NSTCLUS:.WORD	0
+
+	.INCLUDE "fat16.mac"
+	.INCLUDE "sd.mac"
+
+	.END	START

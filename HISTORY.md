@@ -3,6 +3,25 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: FAT16 nested directories (2026-07-29)
+
+FATMKD and FATRMD got the same wrapper/core split as the file ops, so a
+subdirectory can be made or removed inside another subdirectory (not just
+the root). FATMKDC's one wrinkle: the new directory's ".." must point at
+its REAL parent, not always the root - so it takes the parent cluster
+from the current directory (DSTART, or 0 when the parent is the root)
+and writes that into the ".." entry, where FATMKD had hardcoded 0.
+FATRMDC's wrinkle: its emptiness scan descends via FATCD, which clobbers
+the current-directory pointer, so it saves DMODE/DSTART on entry and
+restores them (RMREST) before deleting the entry in the parent via
+FATDELC. Both root wrappers stay "FATDIR0 then the core", and FATMKD's
+dir-full path now propagates FATSLOT's real code (3/4/6) like FATCRE.
+`fat2test.mac` makes TOP, then NESTED inside it, and checks NESTED's ".."
+cluster equals TOP's (a plain root subdir would read 0000 there), then
+removes both - passed first run: TOP at cluster 3, NESTED ".." = 0003.
+That completes the write ladder: every file and directory operation now
+works at any depth.
+
 ## sdcard: FAT16 subdirectory writes (2026-07-29)
 
 Files can now be created, renamed, and deleted INSIDE a subdirectory,

@@ -21,7 +21,9 @@ writes — and **create and remove subdirectories** (`FATMKD` with the
 `.` and `..` entries; `FATRMD` refuses a non-empty one). Files can be
 **created, renamed, and deleted inside a subdirectory** too (`FATCREC` /
 `FATRENC` / `FATDELC` act on the directory made current with `FATCD`,
-growing its cluster chain when it fills). 8.3 names only.
+growing its cluster chain when it fills), and **directories nest** —
+`FATMKDC` / `FATRMDC` make and remove a subdirectory inside another (the
+new dir's `..` points at its real parent). 8.3 names only.
 
 ## Wiring (VIA port B)
 
@@ -87,6 +89,7 @@ builds one test program on top of `sd.mac` / `fat16.mac`.
 | `fatmtest.prj`| FAT16 **make directory**: `FATMKD` `NEWDIR`, verify it's a directory, descend and check the `.` / `..` entries, then remove it (self-cleaning) |
 | `fatrtest.prj`| FAT16 **remove directory**: `FATMKD` `RMDIR`, inject an entry so it's non-empty and confirm `FATRMD` refuses (code 3), clear it, then remove the empty dir (self-cleaning) |
 | `fatstest.prj`| FAT16 **subdirectory writes**: make `SUBDIR`, then inside it create `INSIDE.TXT` (verify data + not in root), rename it, delete it, and remove the empty dir (self-cleaning) |
+| `fat2test.prj`| FAT16 **nested directories**: make `TOP`, then `NESTED` inside it, check `NESTED`'s `..` points at `TOP`'s cluster, then remove both (self-cleaning) |
 
 ## Using it
 

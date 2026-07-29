@@ -6,8 +6,9 @@
 ; (free-cluster search + FAT-entry write), file create (multi-cluster
 ; chain) + delete + rename in any directory (the root or a subdirectory,
 ; growing the subdirectory's cluster chain when it fills), and
-; subdirectory create/remove (FATMKD with . and .. / FATRMD with an
-; emptiness guard). 8.3 names only (long-name entries skipped).
+; subdirectory create/remove in any directory too, so directories nest
+; (FATMKD with . and .. / FATRMD with an emptiness guard). 8.3 names only
+; (long-name entries skipped).
 ;
 ; All sector numbers are 32-bit LBAs, held as word pairs (low, high) and
 ; passed to sd.mac's SDRD in the R0:R1 register pair. Cluster arithmetic
@@ -60,6 +61,10 @@
 ;	FATRMD	R1 -> 11-byte name; remove an EMPTY subdirectory in the
 ;		root -> R0 = 0 ok / 1 not found / 2 write / 3 not empty /
 ;		4 not a directory.
+;	FATMKDC/FATRMDC  same as FATMKD/FATRMD but make/remove the
+;		subdirectory in the directory made current with FATCD, so
+;		directories can nest (the new dir's ".." points at its real
+;		parent). The root wrappers are just "FATDIR0 then the core".
 ;
 ; Directory attribute bits: 0x10 dir, 0x08 volume label, 0x0F long name.
 
@@ -845,16 +850,22 @@ FRNCP:	MOVB	(R3)+, (R2)+
 FRNER:	MOV	#3, R0
 	RTS	PC
 
-; ---- make a subdirectory in the root: R1 -> 11-byte name -----------
+; ---- make a subdirectory: R1 -> 11-byte name -----------------------
 ; Allocates a cluster, zeroes it, writes the mandatory "." (-> itself)
-; and ".." (-> root, cluster 0) entries in its first sector, and adds a
-; directory entry (attr 0x10, size 0) in the root. The whole cluster is
-; zeroed so no stale data shows up as phantom entries. Root parent only.
-; R0 = 0 ok / 2 exists / 3 no cluster / 4 dir full / 6 write error.
+; and ".." (-> the parent) entries in its first sector, and adds a
+; directory entry (attr 0x10, size 0) in the parent. The whole cluster
+; is zeroed so no stale data shows up as phantom entries. FATMKD makes it
+; in the root; FATMKDC makes it in the current directory (FATCD), so
+; directories can nest. R0 = 0 ok / 2 exists / 3 no cluster / 4 dir full
+; / 6 write error.
 
-FATMKD:	MOV	R1, CRNAME
-	JSR	PC, FATDIR0
-	MOV	CRNAME, R1		; already exists?
+FATMKD:	JSR	PC, FATDIR0		; wrapper: make the subdir in the root
+FATMKDC:MOV	R1, CRNAME		; core: make it in the CURRENT directory
+	CLR	MKPAR			; ".." parent cluster (0 = root)
+	TST	DMODE
+	BEQ	FMDP0
+	MOV	DSTART, MKPAR		; nested: the parent is the current dir
+FMDP0:	MOV	CRNAME, R1		; already exists in this directory?
 	JSR	PC, FATOPN
 	TST	R0
 	BNE	FMD1
@@ -903,7 +914,7 @@ FMDS1:	MOVB	#40, (R2)+		; ten spaces
 FMDS2:	MOVB	#40, (R2)+		; nine spaces
 	SOB	R3, FMDS2
 	MOVB	#20, FATBUF+53		; attr 0x10
-	CLR	FATBUF+72		; ".." first cluster = 0 (root)
+	MOV	MKPAR, FATBUF+72	; ".." first cluster = the parent
 	MOV	CRCLUS, R0		; write the dir's first sector
 	JSR	PC, CLBA
 	MOV	#FATBUF, R2
@@ -911,13 +922,14 @@ FMDS2:	MOVB	#40, (R2)+		; nine spaces
 	TST	R0
 	BNE	FMDER
 
-	JSR	PC, FATSLOT		; the entry in the parent (root)
+	JSR	PC, FATSLOT		; the entry in the parent directory
 	TST	R0
 	BEQ	FMD4
-	MOV	CRCLUS, R0		; dir full: give the cluster back
+	MOV	R0, -(SP)		; keep FATSLOT's code (4 full / 3 / 6)
+	MOV	CRCLUS, R0		; give the new dir's cluster back
 	CLR	R1
 	JSR	PC, FATWEN
-	MOV	#4, R0
+	MOV	(SP)+, R0
 	RTS	PC
 FMD4:	MOV	#FATBUF, R3		; zero the 32-byte entry
 	ADD	DSOFF, R3
@@ -945,14 +957,19 @@ FMDN:	MOVB	(R4)+, (R2)+
 FMDER:	MOV	#6, R0
 	RTS	PC
 
-; ---- remove a subdirectory from the root: R1 -> 11-byte name -------
+; ---- remove an empty subdirectory: R1 -> 11-byte name --------------
 ; Refuses unless the directory is empty (only "." and ".."). Descends,
-; scans for any other entry; if none, hands the removal to FATDEL (free
-; the one-cluster chain + mark the parent entry 0xE5).
+; scans for any other entry; if none, hands the removal to FATDELC (free
+; the one-cluster chain + mark the entry 0xE5 in the parent). FATRMD
+; removes from the root; FATRMDC removes from the current directory
+; (FATCD), so nested directories can be removed. The emptiness scan uses
+; FATCD, so the parent context is saved and restored around it.
 ; R0 = 0 ok / 1 not found / 2 write / 3 not empty / 4 not a directory.
 
-FATRMD:	MOV	R1, CRNAME
-	JSR	PC, FATDIR0
+FATRMD:	JSR	PC, FATDIR0		; wrapper: remove from the root
+FATRMDC:MOV	R1, CRNAME		; core: remove from the CURRENT directory
+	MOV	DMODE, RMPMOD		; remember the parent context
+	MOV	DSTART, RMPSTA
 	MOV	CRNAME, R1
 	JSR	PC, FATOPN
 	TST	R0
@@ -972,16 +989,22 @@ FRM3:	JSR	PC, FATNXT
 	BISB	DENAME, R0
 	CMP	R0, #56			; "." or ".." -> keep scanning
 	BEQ	FRM3
-	JSR	PC, FATDIR0		; restore the root as current dir
+	JSR	PC, RMREST		; restore the parent as current dir
 	MOV	#3, R0			; a real entry -> not empty
 	RTS	PC
-FRM4:	MOV	CRNAME, R1		; empty: reuse FATDEL to remove it
-	JSR	PC, FATDEL
+FRM4:	JSR	PC, RMREST		; empty: back to the parent, delete there
+	MOV	CRNAME, R1
+	JSR	PC, FATDELC
 	TST	R0
 	BEQ	FRM5
 	MOV	#2, R0
 	RTS	PC
 FRM5:	CLR	R0
+	RTS	PC
+
+RMREST:	MOV	RMPMOD, DMODE		; restore the saved parent directory
+	MOV	RMPSTA, DSTART
+	JSR	PC, FATREW
 	RTS	PC
 
 ; ---- little-endian readers from a (maybe odd) byte pointer R1 ------
@@ -1051,6 +1074,9 @@ RNNEW:	.WORD	0		; FATREN: new-name pointer
 RNLBA:	.WORD	0		;         old entry's sector LBA (low)
 RNHI:	.WORD	0		;                              (high)
 RNOFF:	.WORD	0		;         old entry's byte offset
+MKPAR:	.WORD	0		; FATMKD: parent cluster for the ".." entry
+RMPMOD:	.WORD	0		; FATRMD: saved parent DMODE
+RMPSTA:	.WORD	0		;         saved parent DSTART
 DENAME:	.BLKB	^D11		; current entry name (8.3, space padded)
 	.EVEN
 FATBUF:	.BLKB	^D512		; one sector: MBR / BPB / dir / FAT
