@@ -3,6 +3,24 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: FAT16 subdirectory removal (2026-07-29)
+
+FATRMD (R1 -> 11-byte name): the honest counterpart to the FATDEL
+shortcut the MKDIR test used. Confirm it's a directory (attr 0x10),
+descend, scan for any entry past "." and ".."; if the directory is empty
+hand the removal to FATDEL (free the one-cluster chain + mark the parent
+entry), otherwise return "not empty" without touching anything. Codes
+0/1 not found/2 write/3 not empty/4 not a directory. `fatrtest.mac`
+tests both halves honestly: after MKDIR it injects a directory entry
+straight into the new cluster (raw SDRD/SDWR via CLBA) so the dir is
+genuinely non-empty, checks FATRMD refuses, clears the entry, then checks
+FATRMD removes it. First run surfaced a state leak - the emptiness scan
+uses FATCD, and the code-3 path returned without restoring the root as
+current dir, so the test's follow-up FATOPN searched inside the subdir
+and misread "vanished". Fixed by a FATDIR0 before the code-3 return (the
+success path already ends at root via FATDEL). The directory was never
+actually deleted - the guard worked; only the current-dir state leaked.
+
 ## sdcard: FAT16 subdirectory creation (2026-07-29)
 
 FATMKD (R1 -> 11-byte name): the first structural write. Allocate a

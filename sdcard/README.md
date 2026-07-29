@@ -17,9 +17,9 @@ afterward). FAT can overwrite existing data in place, the allocation
 primitives (free-cluster search + FAT-entry write to both copies) are
 verified reversibly, and it can **create, delete, and rename** files in the root — including
 **multi-cluster** files, allocating and linking the FAT chain as it
-writes — and **create subdirectories** (`FATMKD`, with the `.` and `..`
-entries). It does not yet write files *inside* a subdirectory. 8.3
-names only.
+writes — and **create and remove subdirectories** (`FATMKD` with the
+`.` and `..` entries; `FATRMD` refuses a non-empty one). It does not yet
+write files *inside* a subdirectory. 8.3 names only.
 
 ## Wiring (VIA port B)
 
@@ -83,6 +83,7 @@ builds one test program on top of `sd.mac` / `fat16.mac`.
 | `fatxtest.prj`| FAT16 **multi-cluster** create/extend: make a 33 KB `XBIG.TXT` (> one 32 KB cluster), check the chain spans two clusters, verify the data, then delete it (self-cleaning) |
 | `fatntest.prj`| FAT16 **rename**: create `RENFROM.TXT`, `FATREN` it to `RENTO.TXT`, verify the new name has the data and the old is gone, delete (self-cleaning) |
 | `fatmtest.prj`| FAT16 **make directory**: `FATMKD` `NEWDIR`, verify it's a directory, descend and check the `.` / `..` entries, then remove it (self-cleaning) |
+| `fatrtest.prj`| FAT16 **remove directory**: `FATMKD` `RMDIR`, inject an entry so it's non-empty and confirm `FATRMD` refuses (code 3), clear it, then remove the empty dir (self-cleaning) |
 
 ## Using it
 

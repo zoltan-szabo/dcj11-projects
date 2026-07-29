@@ -4,9 +4,10 @@
 ; geometry, and offers a directory iterator (root or any subdirectory),
 ; whole-file reading, overwrite-in-place, the FAT allocation primitives
 ; (free-cluster search + FAT-entry write), file create (multi-cluster
-; chain) + delete + rename in the root, and subdirectory creation
-; (FATMKD, with . and ..). Writing files inside a subdirectory is not
-; done yet. 8.3 names only (long-name entries skipped).
+; chain) + delete + rename in the root, and subdirectory create/remove
+; (FATMKD with . and .. / FATRMD with an emptiness guard). Writing files
+; inside a subdirectory is not done yet. 8.3 names only (long-name
+; entries skipped).
 ;
 ; All sector numbers are 32-bit LBAs, held as word pairs (low, high) and
 ; passed to sd.mac's SDRD in the R0:R1 register pair. Cluster arithmetic
@@ -51,6 +52,9 @@
 ;	FATMKD	R1 -> 11-byte name; make a subdirectory in the root
 ;		(with . and .. entries) -> R0 = 0 ok / 2 exists / 3 no
 ;		cluster / 4 dir full / 6 write error.
+;	FATRMD	R1 -> 11-byte name; remove an EMPTY subdirectory in the
+;		root -> R0 = 0 ok / 1 not found / 2 write / 3 not empty /
+;		4 not a directory.
 ;
 ; Directory attribute bits: 0x10 dir, 0x08 volume label, 0x0F long name.
 
@@ -846,6 +850,45 @@ FMDN:	MOVB	(R4)+, (R2)+
 	CLR	R0
 	RTS	PC
 FMDER:	MOV	#6, R0
+	RTS	PC
+
+; ---- remove a subdirectory from the root: R1 -> 11-byte name -------
+; Refuses unless the directory is empty (only "." and ".."). Descends,
+; scans for any other entry; if none, hands the removal to FATDEL (free
+; the one-cluster chain + mark the parent entry 0xE5).
+; R0 = 0 ok / 1 not found / 2 write / 3 not empty / 4 not a directory.
+
+FATRMD:	MOV	R1, CRNAME
+	JSR	PC, FATDIR0
+	MOV	CRNAME, R1
+	JSR	PC, FATOPN
+	TST	R0
+	BEQ	FRM1
+	MOV	#1, R0			; not found
+	RTS	PC
+FRM1:	BIT	#20, DEATTR		; 0x10 = directory
+	BNE	FRM2
+	MOV	#4, R0			; not a directory
+	RTS	PC
+FRM2:	MOV	DECLUS, R0		; descend and test emptiness
+	JSR	PC, FATCD
+FRM3:	JSR	PC, FATNXT
+	TST	R0
+	BNE	FRM4			; end of dir -> empty
+	CLR	R0
+	BISB	DENAME, R0
+	CMP	R0, #56			; "." or ".." -> keep scanning
+	BEQ	FRM3
+	JSR	PC, FATDIR0		; restore the root as current dir
+	MOV	#3, R0			; a real entry -> not empty
+	RTS	PC
+FRM4:	MOV	CRNAME, R1		; empty: reuse FATDEL to remove it
+	JSR	PC, FATDEL
+	TST	R0
+	BEQ	FRM5
+	MOV	#2, R0
+	RTS	PC
+FRM5:	CLR	R0
 	RTS	PC
 
 ; ---- little-endian readers from a (maybe odd) byte pointer R1 ------
