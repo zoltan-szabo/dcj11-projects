@@ -3,6 +3,38 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: FAT16 multi-cluster create + a latent chain-walk bug (2026-07-29)
+
+FATCRE generalised: the data-write half now allocates and links a
+cluster chain as the data flows - when a cluster fills and bytes remain,
+FATFREE the next, FATWEN cur->next, mark next EOC, continue. The <=512
+cap is gone (16-bit length). `fatxtest.mac` creates a 33280-byte (65
+sector) file - one cluster is 64 sectors here, so it spans two - checks
+the directory's first cluster FATNX'es to a real second cluster, verifies
+the position pattern across the boundary, then deletes it (multi-cluster
+free too). Self-cleaning.
+
+Two bugs found, both instructive:
+- Inverted branch: FATFREE returns the cluster (nonzero) on success, but
+  the extend used `TST R0 / BNE out-of-space`, so a SUCCESSFUL alloc took
+  the error path. Create failed exactly when extend worked.
+- THE latent one: FATRD and FATWR hold the byte count in R3 and, on a
+  cluster-boundary sector, call FATNX to follow the chain - but FATNX
+  clobbers R3, so those routines returned a GARBAGE count on boundary
+  sectors. Never caught before because every earlier test used files <= 1
+  cluster, so the boundary path never ran. The disk data was always
+  correct; only the readback count was wrong (a verify loop ran 3412
+  bytes into garbage). Fix: save/restore R3 across FATNX in both. Third
+  instance this project of "a subroutine clobbering a register holding a
+  live value" (after SDCMD's R0 and a test harness's R0) - the recurring
+  PDP-11 hazard.
+
+Also relearned: test buffers must stay BELOW the I/O page (160000) or
+reads/writes hit device registers, not RAM (a 33 KB buffer at 60000 ran
+into it). And m11asm fills even a trailing .BLKB with zeros in its
+contiguous emission, so a big buffer bloats the .oct - define it as a
+fixed RAM address (=) instead.
+
 ## sdcard: FAT16 file delete (2026-07-29)
 
 FATDEL (R1 name): FATOPN the file, walk its cluster chain freeing each

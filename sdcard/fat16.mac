@@ -3,9 +3,9 @@
 ; Mounts the first MBR partition, reads its BPB, computes the on-disk
 ; geometry, and offers a directory iterator (root or any subdirectory),
 ; whole-file reading, overwrite-in-place, the FAT allocation primitives
-; (free-cluster search + FAT-entry write), and small single-cluster file
-; create + delete in the root. No extend past one cluster and no
-; subdirectory writes yet. 8.3 names only (long-name entries skipped).
+; (free-cluster search + FAT-entry write), and file create (allocating a
+; multi-cluster chain) + delete in the root. No subdirectory writes yet.
+; 8.3 names only (long-name entries skipped).
 ;
 ; All sector numbers are 32-bit LBAs, held as word pairs (low, high) and
 ; passed to sd.mac's SDRD in the R0:R1 register pair. Cluster arithmetic
@@ -37,10 +37,11 @@
 ;		FAT copy -> R0 = 0 ok / 1 error. (Allocation primitive.)
 ;	FATFREE	find a free cluster -> R0 = cluster number, 0 if none.
 ;	(FATNX R0=cluster -> R0 = the entry's value is the FAT reader.)
-;	FATCRE	R1 -> 8.3 name, R2 -> 512-byte data buffer, R3 = length;
-;		create a small file (<= 512 bytes, one cluster) in the
-;		root -> R0 = 0 ok / 2 exists / 3 no cluster / 4 dir full /
-;		5 too big / 6 write error.
+;	FATCRE	R1 -> 8.3 name, R2 -> data buffer, R3 = length (16-bit);
+;		create a file in the root, allocating a cluster chain as
+;		needed -> R0 = 0 ok / 2 exists / 3 no cluster / 4 dir full
+;		/ 6 write error / 7 out of space mid-file. The buffer must
+;		hold ceil(len/512) whole sectors.
 ;	FATDEL	R1 -> 8.3 name; delete the file from the root: free its
 ;		cluster chain and mark the entry 0xE5 -> R0 = 0 ok / 1 not
 ;		found / 2 write error.
@@ -346,9 +347,11 @@ FR2:	SUB	R3, FSIZE		; remaining -= count (32-bit)
 	CMP	FSECI, SPCLUS
 	BLO	FR3
 	CLR	FSECI
+	MOV	R3, -(SP)		; FATNX clobbers R3 (the byte count)
 	MOV	FCLUS, R0
 	JSR	PC, FATNX
 	MOV	R0, FCLUS
+	MOV	(SP)+, R3
 FR3:	MOV	R3, R0
 	RTS	PC
 FREOF:	CLR	R0
@@ -394,9 +397,11 @@ FW2:	SUB	R3, FSIZE		; remaining -= count (32-bit)
 	CMP	FSECI, SPCLUS
 	BLO	FW3
 	CLR	FSECI
+	MOV	R3, -(SP)		; FATNX clobbers R3 (the byte count)
 	MOV	FCLUS, R0
 	JSR	PC, FATNX
 	MOV	R0, FCLUS
+	MOV	(SP)+, R3
 FW3:	MOV	R3, R0
 	RTS	PC
 FWEOF:	CLR	R0
@@ -542,11 +547,7 @@ FSLNON:	MOV	#1, R0
 FATCRE:	MOV	R1, CRNAME
 	MOV	R2, CRDATA
 	MOV	R3, CRLEN
-	CMP	R3, #^D512		; single-sector limit for now
-	BLOS	FCR0
-	MOV	#5, R0
-	RTS	PC
-FCR0:	JSR	PC, FATDIR0		; create in (and search) the root
+	JSR	PC, FATDIR0		; create in (and search) the root
 	MOV	CRNAME, R1		; already present?
 	JSR	PC, FATOPN
 	TST	R0
@@ -596,15 +597,53 @@ FCN:	MOVB	(R4)+, (R2)+
 	BEQ	FCR5
 	MOV	#6, R0
 	RTS	PC
-FCR5:	MOV	CRCLUS, R0		; write the one data sector
+FCR5:	MOV	CRCLUS, WRCUR		; write the data, extending as needed
+	CLR	WRSEC			; sector within the current cluster
+	MOV	CRDATA, WRPTR		; source pointer
+	MOV	CRLEN, WRREM		; bytes still to write (16-bit)
+FCWL:	TST	WRREM
+	BEQ	FCR6			; all written
+	MOV	WRCUR, R0		; write one sector
 	JSR	PC, CLBA
-	MOV	CRDATA, R2
+	ADD	WRSEC, R0
+	ADC	R1
+	MOV	WRPTR, R2
 	JSR	PC, SDWR
 	TST	R0
+	BNE	FCWER
+	ADD	#^D512, WRPTR		; advance source + remaining
+	CMP	WRREM, #^D512
+	BLO	FCWLST
+	SUB	#^D512, WRREM
+	BR	FCWADV
+FCWLST:	CLR	WRREM			; last (partial) sector
+FCWADV:	INC	WRSEC			; next sector; new cluster if full
+	CMP	WRSEC, SPCLUS
+	BLO	FCWL
+	TST	WRREM			; cluster full and more to write?
 	BEQ	FCR6
-	MOV	#6, R0
-	RTS	PC
+	JSR	PC, FATFREE		; extend: grab the next cluster
+	TST	R0
+	BEQ	FCWNSP			; 0 = no free cluster left
+	MOV	R0, WRNXT
+	MOV	WRCUR, R0		; link current -> next
+	MOV	WRNXT, R1
+	JSR	PC, FATWEN
+	TST	R0
+	BNE	FCWER
+	MOV	WRNXT, R0		; mark next end-of-chain
+	MOV	#177777, R1
+	JSR	PC, FATWEN
+	TST	R0
+	BNE	FCWER
+	MOV	WRNXT, WRCUR
+	CLR	WRSEC
+	BR	FCWL
 FCR6:	CLR	R0
+	RTS	PC
+FCWER:	MOV	#6, R0
+	RTS	PC
+FCWNSP:	MOV	#7, R0			; ran out of space mid-file
 	RTS	PC
 
 ; ---- delete a file: R1 -> 11-byte 8.3 name -------------------------
@@ -711,6 +750,11 @@ DEHI:	.WORD	0		;                            (high)
 DEOFF:	.WORD	0		; matched entry's byte offset in FATBUF
 CHCUR:	.WORD	0		; FATDEL: chain cursor
 CHNXT:	.WORD	0		;         next cluster in the chain
+WRCUR:	.WORD	0		; FATCRE data write: current cluster
+WRSEC:	.WORD	0		;                    sector within it
+WRPTR:	.WORD	0		;                    source pointer
+WRREM:	.WORD	0		;                    bytes remaining
+WRNXT:	.WORD	0		;                    newly-allocated cluster
 DENAME:	.BLKB	^D11		; current entry name (8.3, space padded)
 	.EVEN
 FATBUF:	.BLKB	^D512		; one sector: MBR / BPB / dir / FAT
