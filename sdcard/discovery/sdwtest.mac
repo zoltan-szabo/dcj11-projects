@@ -1,0 +1,222 @@
+; sdwtest.mac — verify the raw sector WRITE path (sd.mac SDWR)
+;
+; Writes a known 512-byte pattern to a scratch sector, reads it back,
+; and compares. The scratch LBA is 100 — inside the MBR gap, before the
+; first partition (LBA 2048), so it is NOT part of the FAT16 volume and
+; a bug here cannot corrupt files. The sector's original contents are
+; saved first and written back at the end, leaving the card as found.
+;
+; Pattern: byte[i] = (i + 0x11) & 0xFF — position-dependent, so a stuck
+; byte, a wrong offset, or a byte-order slip all show up.
+;
+; Assemble:	part of sdwtest.prj (origin 1000); run with P or 1000G.
+
+.	= 1000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+SCRLBA	= ^D100			; scratch sector (MBR gap, before LBA 2048)
+
+START:	MOV	#340, @#177776	; priority 7
+	MOV	#1000, SP
+	MOV	#MHELLO, R1
+	JSR	PC, PMSG
+
+	JSR	PC, SDINI	; bring up the card
+	TST	R0
+	BEQ	SAVE
+	MOV	#MNOSD, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- save the original scratch sector -------------------------------
+
+SAVE:	MOV	#MSAVE, R1
+	JSR	PC, PMSG
+	MOV	#SCRLBA, R0
+	CLR	R1
+	MOV	#SAVBUF, R2
+	JSR	PC, SDRD
+	TST	R0
+	BEQ	FILL
+	MOV	#MRDER, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- fill the pattern, write it -------------------------------------
+
+FILL:	MOV	#PATBUF, R2	; byte[i] = (i + 0x11) & 0xFF
+	CLR	R3
+	MOV	#^D512, R4
+PF1:	MOV	R3, R0
+	ADD	#^D17, R0
+	MOVB	R0, (R2)+
+	INC	R3
+	SOB	R4, PF1
+
+	MOV	#MWR, R1
+	JSR	PC, PMSG
+	MOV	#SCRLBA, R0
+	CLR	R1
+	MOV	#PATBUF, R2
+	JSR	PC, SDWR
+	TST	R0
+	BEQ	READBK
+	MOV	#MWRER, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- clear the read buffer, read the sector back --------------------
+
+READBK:	MOV	#RDBUF, R2	; poison with 0xEE so a stale buffer can't
+	MOV	#^D512, R4	; masquerade as a good read
+RC1:	MOVB	#356, (R2)+
+	SOB	R4, RC1
+
+	MOV	#MRD, R1
+	JSR	PC, PMSG
+	MOV	#SCRLBA, R0
+	CLR	R1
+	MOV	#RDBUF, R2
+	JSR	PC, SDRD
+	TST	R0
+	BEQ	CMP
+	MOV	#MRDER, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- compare ---------------------------------------------------------
+
+CMP:	MOV	#PATBUF, R2
+	MOV	#RDBUF, R3
+	CLR	R4		; offset
+CM1:	CLR	R0
+	BISB	(R2)+, R0
+	CLR	R1
+	BISB	(R3)+, R1
+	CMP	R0, R1
+	BNE	MISM
+	INC	R4
+	CMP	R4, #^D512
+	BLO	CM1
+
+	MOV	#MOK, R1	; all 512 bytes matched
+	JSR	PC, PMSG
+	BR	RESTOR
+
+MISM:	MOV	R0, -(SP)	; report offset / expected / got
+	MOV	R1, -(SP)
+	MOV	#MMISM, R1
+	JSR	PC, PMSG
+	MOV	R4, R0
+	JSR	PC, PHEX4
+	MOV	#MEXP, R1
+	JSR	PC, PMSG
+	MOV	2(SP), R0
+	JSR	PC, PHEX2
+	MOV	#MGOT, R1
+	JSR	PC, PMSG
+	MOV	(SP), R0
+	JSR	PC, PHEX2
+	JSR	PC, PCRLF
+	ADD	#4, SP
+
+; ---- restore the original sector ------------------------------------
+
+RESTOR:	MOV	#MREST, R1
+	JSR	PC, PMSG
+	MOV	#SCRLBA, R0
+	CLR	R1
+	MOV	#SAVBUF, R2
+	JSR	PC, SDWR
+	MOV	#MDONE, R1
+	JSR	PC, PMSG
+	HALT
+	JMP	START
+
+; ---- console ---------------------------------------------------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMSG2
+	JSR	PC, PUTC
+	BR	PMSG
+PMSG2:	RTS	PC
+
+PCRLF:	MOV	#15, R0
+	JSR	PC, PUTC
+	MOV	#12, R0
+	JSR	PC, PUTC
+	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+PHEX4:	MOV	R0, -(SP)
+	SWAB	R0
+	JSR	PC, PHEX2
+	MOV	(SP)+, R0
+	JSR	PC, PHEX2
+	RTS	PC
+
+PHEX2:	BIC	#177400, R0
+	MOV	R0, -(SP)
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	JSR	PC, PNIB
+	MOV	(SP)+, R0
+	JSR	PC, PNIB
+	RTS	PC
+
+PNIB:	BIC	#177760, R0
+	CMP	R0, #^D9
+	BGT	PNA
+	ADD	#60, R0
+	BR	PNP
+PNA:	ADD	#^D55, R0	; 'A'-10
+PNP:	JSR	PC, PUTC
+	RTS	PC
+
+; ---- messages and buffers -------------------------------------------
+
+MHELLO:	.ASCII	/SDWTEST - scratch LBA 100/
+	.BYTE	15, 12, 0
+MNOSD:	.ASCII	/SD INIT FAILED/
+	.BYTE	15, 12, 0
+MSAVE:	.ASCII	/SAVE ORIG.../
+	.BYTE	15, 12, 0
+MWR:	.ASCII	/WRITE PATTERN.../
+	.BYTE	15, 12, 0
+MRD:	.ASCII	/READ BACK.../
+	.BYTE	15, 12, 0
+MOK:	.ASCII	/WRITE VERIFIED - 512 BYTES MATCH/
+	.BYTE	15, 12, 0
+MMISM:	.ASCII	/MISMATCH AT /
+	.BYTE	0
+MEXP:	.ASCII	/ EXP /
+	.BYTE	0
+MGOT:	.ASCII	/ GOT /
+	.BYTE	0
+MWRER:	.ASCII	/WRITE FAILED/
+	.BYTE	15, 12, 0
+MRDER:	.ASCII	/READ FAILED/
+	.BYTE	15, 12, 0
+MREST:	.ASCII	/RESTORE ORIG.../
+	.BYTE	15, 12, 0
+MDONE:	.ASCII	/DONE/
+	.BYTE	15, 12, 0
+	.EVEN
+
+SAVBUF:	.BLKB	^D512		; original scratch-sector contents
+	.EVEN
+PATBUF:	.BLKB	^D512		; the test pattern
+	.EVEN
+RDBUF:	.BLKB	^D512		; read-back buffer
+	.EVEN
+
+	.INCLUDE "../sddrv/sd.mac"
+
+	.END	START

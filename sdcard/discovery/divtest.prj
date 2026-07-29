@@ -1,0 +1,16 @@
+{
+  "build" : {
+    "autosave" : true,
+    "lstPageBreaks" : false,
+    "makeLst" : true,
+    "makeSym" : true,
+    "outputDir" : "."
+  },
+  "files" : [
+    "divtest.mac"
+  ],
+  "main" : "divtest.mac",
+  "name" : "divtest",
+  "origin" : "1000",
+  "schema" : 1
+}

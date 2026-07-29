@@ -1,0 +1,166 @@
+; sdls.mac — sample: list the SD card's root directory
+;
+; A minimal user of the two modules in this project:
+;	../sddrv/sd.mac   — the bit-banged SD/SPI block driver
+;	../fat16/fat16.mac — the FAT16 filesystem layer
+;
+; It initialises the card, mounts the first FAT16 partition, and prints
+; every entry in the root directory with its size (hex) or a <DIR> mark
+; — the "hello world" of the filesystem. See ../fat16/fat16.md for the
+; full API and on-disk details.
+;
+; Assemble:	part of sdls.prj (origin 1000); run with P or 1000G.
+
+.	= 1000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+
+START:	MOV	#340, @#177776	; priority 7
+	MOV	#1000, SP
+	MOV	#MHELLO, R1
+	JSR	PC, PMSG
+
+	JSR	PC, SDINI	; bring up the card
+	TST	R0
+	BEQ	MOUNT
+	MOV	#MNOSD, R1
+	JSR	PC, PMSG
+	HALT
+MOUNT:	JSR	PC, FATMNT	; mount the first FAT16 partition
+	TST	R0
+	BEQ	LIST
+	MOV	#MNOMNT, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- list the root directory ----------------------------------------
+
+LIST:	MOV	#MHDR, R1
+	JSR	PC, PMSG
+	JSR	PC, FATDIR0	; current directory = root
+LOOP:	JSR	PC, FATNXT	; next 8.3 entry
+	TST	R0
+	BNE	DONE
+	JSR	PC, PNAME	; print the name, padded
+	BIT	#20, DEATTR	; 0x10 = directory?
+	BEQ	LSIZE
+	MOV	#MDIR, R1
+	JSR	PC, PMSG
+	BR	LNL
+LSIZE:	MOV	DESIZE+2, R0	; size, high word then low (hex)
+	JSR	PC, PHEX4
+	MOV	DESIZE, R0
+	JSR	PC, PHEX4
+LNL:	JSR	PC, PCRLF
+	BR	LOOP
+DONE:	MOV	#MEND, R1
+	JSR	PC, PMSG
+	HALT
+	JMP	START
+
+; ---- print the 8.3 name (NAME.EXT, trimmed), padded to column 14 ----
+
+PNAME:	CLR	CNT
+	CLR	R2		; walk the 8-char name, stop at a space
+PN1:	MOVB	DENAME(R2), R0
+	CMP	R0, #40
+	BEQ	PNEXT
+	JSR	PC, PUTCC
+	INC	R2
+	CMP	R2, #^D8
+	BLO	PN1
+PNEXT:	CLR	R0		; is there an extension?
+	BISB	DENAME+^D8, R0
+	CMP	R0, #40
+	BEQ	PNPAD
+	MOV	#56, R0		; '.'
+	JSR	PC, PUTCC
+	MOV	#^D8, R2	; the 3-char extension, stop at a space
+PN2:	MOVB	DENAME(R2), R0
+	CMP	R0, #40
+	BEQ	PNPAD
+	JSR	PC, PUTCC
+	INC	R2
+	CMP	R2, #^D11
+	BLO	PN2
+PNPAD:	CMP	CNT, #^D14	; pad with spaces to column 14
+	BHIS	PNRET
+	MOV	#40, R0
+	JSR	PC, PUTC
+	INC	CNT
+	BR	PNPAD
+PNRET:	RTS	PC
+
+PUTCC:	JSR	PC, PUTC	; emit and count (for padding)
+	INC	CNT
+	RTS	PC
+
+; ---- console ---------------------------------------------------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMSG2
+	JSR	PC, PUTC
+	BR	PMSG
+PMSG2:	RTS	PC
+
+PCRLF:	MOV	#15, R0
+	JSR	PC, PUTC
+	MOV	#12, R0
+	JSR	PC, PUTC
+	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+PHEX4:	MOV	R0, -(SP)
+	SWAB	R0
+	JSR	PC, PHEX2
+	MOV	(SP)+, R0
+	JSR	PC, PHEX2
+	RTS	PC
+
+PHEX2:	BIC	#177400, R0
+	MOV	R0, -(SP)
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	JSR	PC, PNIB
+	MOV	(SP)+, R0
+	JSR	PC, PNIB
+	RTS	PC
+
+PNIB:	BIC	#177760, R0
+	CMP	R0, #^D9
+	BGT	PNA
+	ADD	#60, R0
+	BR	PNP
+PNA:	ADD	#^D55, R0
+PNP:	JSR	PC, PUTC
+	RTS	PC
+
+; ---- data -----------------------------------------------------------
+
+CNT:	.WORD	0		; characters printed on the current name
+
+MHELLO:	.ASCII	/sdls - list the SD card root directory/
+	.BYTE	15, 12, 0
+MNOSD:	.ASCII	/SD INIT FAILED/
+	.BYTE	15, 12, 0
+MNOMNT:	.ASCII	/MOUNT FAILED/
+	.BYTE	15, 12, 0
+MHDR:	.ASCII	/NAME          SIZE/
+	.BYTE	15, 12, 0
+MDIR:	.ASCII	/<DIR>/
+	.BYTE	0
+MEND:	.ASCII	/--- end of listing/
+	.BYTE	15, 12, 0
+	.EVEN
+
+	.INCLUDE "../fat16/fat16.mac"
+	.INCLUDE "../sddrv/sd.mac"
+
+	.END	START

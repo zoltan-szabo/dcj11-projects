@@ -1,0 +1,280 @@
+; fatxtest.mac — FAT16 multi-cluster create/extend test
+;
+; Creates a file larger than one cluster, so FATCRE must allocate and
+; link a second cluster. Verifies (a) the directory's first cluster
+; chains to a real second cluster, and (b) the data reads back with a
+; position pattern; then deletes it (exercising multi-cluster free too).
+; Self-cleaning.
+;
+; The file is NSECT * 512 bytes; on this card one cluster is 64 sectors
+; (32 KB), so 65 sectors spans two clusters, crossing the boundary once.
+; The pattern is byte[i] = i & 0xFF; since 512 is a multiple of 256,
+; every sector reads 00 01 .. FF 00 01 .. so each sector's byte j = j.
+;
+; Assemble:	part of fatxtest.prj (origin 1000); run with P or 1000G.
+
+.	= 1000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+NSECT	= ^D65			; sectors (> one 64-sector cluster)
+FLEN	= ^D33280		; NSECT * 512
+; Buffers live in RAM above the code, defined as addresses (not .BLKB)
+; so m11asm's contiguous emission doesn't put 33 KB of zeros in the .oct.
+; They must stay BELOW the I/O page (160000): the code ends ~11000, and
+; DATABUF..RDBUF end at 122000, well clear of both.
+DATABUF	= 20000			; 33280-byte data buffer (ends 121000)
+RDBUF	= 121000		; DATABUF + FLEN; read-back sector buffer
+
+START:	MOV	#340, @#177776	; priority 7
+	MOV	#1000, SP
+	MOV	#MHELLO, R1
+	JSR	PC, PMSG
+
+	JSR	PC, SDINI
+	TST	R0
+	BEQ	MOUNT
+	MOV	#MNOSD, R1
+	JSR	PC, PMSG
+	HALT
+MOUNT:	JSR	PC, FATMNT
+	TST	R0
+	BEQ	FRESH
+	MOV	#MNOMNT, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- clean slate, fill pattern, create ------------------------------
+
+FRESH:	MOV	#FNAME, R1	; delete any leftover from a prior run
+	JSR	PC, FATDEL
+
+	MOV	#DATABUF, R2	; byte[i] = i & 0xFF
+	CLR	R3
+	MOV	#FLEN, R4
+FIL:	MOVB	R3, (R2)+
+	INC	R3
+	SOB	R4, FIL
+
+	MOV	#MMK, R1
+	JSR	PC, PMSG
+	MOV	#FNAME, R1
+	MOV	#DATABUF, R2
+	MOV	#FLEN, R3
+	JSR	PC, FATCRE
+	TST	R0
+	BEQ	CHAIN
+	MOV	R0, R4		; save before PMSG clobbers R0
+	MOV	#MCERR, R1
+	JSR	PC, PMSG
+	MOV	R4, R0
+	ADD	#60, R0
+	JSR	PC, PUTC
+	JSR	PC, PCRLF
+	HALT
+
+; ---- check the chain spans two clusters -----------------------------
+
+CHAIN:	MOV	#FNAME, R1
+	JSR	PC, FATOPN
+	TST	R0
+	BEQ	CH1
+	MOV	#MNOF, R1
+	JSR	PC, PMSG
+	HALT
+CH1:	MOV	FCLUS, R2	; first cluster
+	MOV	R2, R0
+	JSR	PC, FATNX	; second cluster
+	MOV	R0, R3		; save it
+	MOV	#MCH, R1
+	JSR	PC, PMSG
+	MOV	R2, R0		; print C1
+	JSR	PC, PHEX4
+	MOV	#MARR, R1
+	JSR	PC, PMSG
+	MOV	R3, R0		; print C2
+	JSR	PC, PHEX4
+	JSR	PC, PCRLF
+	CMP	R3, #2		; C2 must be a real cluster
+	BLO	CHBAD
+	CMP	R3, #177770
+	BHIS	CHBAD		; EOC here = only one cluster = no extend
+	MOV	#MCHOK, R1
+	JSR	PC, PMSG
+	BR	VDATA
+CHBAD:	MOV	#MCHNO, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- verify the data reads back ------------------------------------
+
+VDATA:	MOV	#FNAME, R1
+	JSR	PC, FATOPN
+	CLR	SECCNT
+VRL:	MOV	#RDBUF, R2
+	JSR	PC, FATRD
+	TST	R0
+	BEQ	VRDONE
+	MOV	R0, R3		; bytes in this sector
+	MOV	#RDBUF, R4
+	CLR	R5		; within-sector index = expected byte
+VCB:	CLR	R0
+	BISB	(R4)+, R0
+	MOV	R5, R1
+	BIC	#177400, R1	; expect j & 0xFF
+	CMP	R0, R1
+	BNE	VDBAD
+	INC	R5
+	SOB	R3, VCB
+	INC	SECCNT
+	BR	VRL
+VRDONE:	CMP	SECCNT, #NSECT	; all sectors present?
+	BNE	VDBAD
+	MOV	#MDOK, R1
+	JSR	PC, PMSG
+	BR	CLEAN
+VDBAD:	MOV	R0, VG		; got
+	MOV	R1, VE		; expected
+	MOV	R5, VJ		; byte index in sector
+	MOV	#MDBAD, R1
+	JSR	PC, PMSG
+	MOV	#MSEC, R1
+	JSR	PC, PMSG
+	MOV	SECCNT, R0
+	JSR	PC, PHEX4
+	MOV	#MOFF, R1
+	JSR	PC, PMSG
+	MOV	VJ, R0
+	JSR	PC, PHEX4
+	MOV	#MEXP, R1
+	JSR	PC, PMSG
+	MOV	VE, R0
+	JSR	PC, PHEX2
+	MOV	#MGOT, R1
+	JSR	PC, PMSG
+	MOV	VG, R0
+	JSR	PC, PHEX2
+	JSR	PC, PCRLF
+	HALT
+
+; ---- delete (multi-cluster) and confirm gone ------------------------
+
+CLEAN:	MOV	#FNAME, R1
+	JSR	PC, FATDEL
+	TST	R0
+	BEQ	CL1
+	MOV	#MDELE, R1
+	JSR	PC, PMSG
+	HALT
+CL1:	MOV	#FNAME, R1
+	JSR	PC, FATOPN
+	TST	R0
+	BNE	CLGONE
+	MOV	#MSTILL, R1
+	JSR	PC, PMSG
+	HALT
+CLGONE:	MOV	#MDONE, R1
+	JSR	PC, PMSG
+	HALT
+	JMP	START
+
+; ---- console ---------------------------------------------------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMSG2
+	JSR	PC, PUTC
+	BR	PMSG
+PMSG2:	RTS	PC
+
+PCRLF:	MOV	#15, R0
+	JSR	PC, PUTC
+	MOV	#12, R0
+	JSR	PC, PUTC
+	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+PHEX4:	MOV	R0, -(SP)
+	SWAB	R0
+	JSR	PC, PHEX2
+	MOV	(SP)+, R0
+	JSR	PC, PHEX2
+	RTS	PC
+
+PHEX2:	BIC	#177400, R0
+	MOV	R0, -(SP)
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	JSR	PC, PNIB
+	MOV	(SP)+, R0
+	JSR	PC, PNIB
+	RTS	PC
+
+PNIB:	BIC	#177760, R0
+	CMP	R0, #^D9
+	BGT	PNA
+	ADD	#60, R0
+	BR	PNP
+PNA:	ADD	#^D55, R0
+PNP:	JSR	PC, PUTC
+	RTS	PC
+
+; ---- name and messages ----------------------------------------------
+
+FNAME:	.ASCII	/XBIG    TXT/	; 8.3: XBIG + 4 spaces + TXT
+	.EVEN
+
+MHELLO:	.ASCII	/FATXTEST - multi-cluster file/
+	.BYTE	15, 12, 0
+MNOSD:	.ASCII	/SD INIT FAILED/
+	.BYTE	15, 12, 0
+MNOMNT:	.ASCII	/MOUNT FAILED/
+	.BYTE	15, 12, 0
+MMK:	.ASCII	/CREATING 33280-BYTE FILE.../
+	.BYTE	15, 12, 0
+MCERR:	.ASCII	/CREATE ERROR CODE /
+	.BYTE	0
+MNOF:	.ASCII	/NOT FOUND AFTER CREATE/
+	.BYTE	15, 12, 0
+MCH:	.ASCII	/CHAIN: /
+	.BYTE	0
+MARR:	.ASCII	/ -> /
+	.BYTE	0
+MCHOK:	.ASCII	/SPANS TWO CLUSTERS - extend OK/
+	.BYTE	15, 12, 0
+MCHNO:	.ASCII	/ONLY ONE CLUSTER - extend FAILED/
+	.BYTE	15, 12, 0
+MDOK:	.ASCII	/DATA VERIFIED - all 65 sectors match/
+	.BYTE	15, 12, 0
+MDBAD:	.ASCII	/DATA MISMATCH/
+	.BYTE	15, 12, 0
+MSEC:	.ASCII	/  sector /
+	.BYTE	0
+MOFF:	.ASCII	/ off /
+	.BYTE	0
+MEXP:	.ASCII	/ exp /
+	.BYTE	0
+MGOT:	.ASCII	/ got /
+	.BYTE	0
+MDELE:	.ASCII	/DELETE FAILED/
+	.BYTE	15, 12, 0
+MSTILL:	.ASCII	/STILL PRESENT AFTER DELETE/
+	.BYTE	15, 12, 0
+MDONE:	.ASCII	/--- DONE (created, verified, deleted)/
+	.BYTE	15, 12, 0
+
+	.EVEN
+SECCNT:	.WORD	0
+VG:	.WORD	0
+VE:	.WORD	0
+VJ:	.WORD	0
+
+	.INCLUDE "../fat16/fat16.mac"
+	.INCLUDE "../sddrv/sd.mac"
+
+	.END	START

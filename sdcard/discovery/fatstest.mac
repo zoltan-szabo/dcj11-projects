@@ -1,0 +1,301 @@
+; fatstest.mac — FAT16 subdirectory-write test (FATCREC/FATRENC/FATDELC)
+;
+; Makes a subdirectory SUBDIR, then inside it: creates INSIDE.TXT,
+; verifies the data (and that it is NOT in the root), renames it to
+; RENAMED.TXT, then deletes it. Finally removes the now-empty SUBDIR.
+; Exercises the current-directory create/rename/delete cores, which
+; walk the subdirectory's cluster chain. Self-cleaning and re-runnable.
+;
+; Assemble:	part of fatstest.prj (origin 1000); run with P or 1000G.
+
+.	= 1000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+
+START:	MOV	#340, @#177776	; priority 7
+	MOV	#1000, SP
+	MOV	#MHELLO, R1
+	JSR	PC, PMSG
+
+	JSR	PC, SDINI
+	TST	R0
+	BEQ	MOUNT
+	MOV	#MNOSD, R1
+	JSR	PC, PMSG
+	HALT
+MOUNT:	JSR	PC, FATMNT
+	TST	R0
+	BEQ	CLEAN0
+	MOV	#MNOMNT, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- remove any leftover from a prior run ---------------------------
+
+CLEAN0:	JSR	PC, FATDIR0
+	MOV	#SUBNAM, R1
+	JSR	PC, FATOPN
+	TST	R0
+	BNE	MKD		; no leftover subdir
+	MOV	DECLUS, SUBCLUS
+	MOV	SUBCLUS, R0
+	JSR	PC, FATCD
+	MOV	#FILNAM, R1
+	JSR	PC, FATDELC	; leftover INSIDE.TXT (ignore result)
+	MOV	SUBCLUS, R0
+	JSR	PC, FATCD
+	MOV	#FIL2, R1
+	JSR	PC, FATDELC	; leftover RENAMED.TXT (ignore result)
+	JSR	PC, FATDIR0
+	MOV	#SUBNAM, R1
+	JSR	PC, FATRMD
+
+; ---- make the subdirectory ------------------------------------------
+
+MKD:	MOV	#SUBNAM, R1
+	JSR	PC, FATMKD
+	TST	R0
+	BEQ	MKOK
+	MOV	#MMKERR, R1
+	JSR	PC, PMSG
+	HALT
+MKOK:	MOV	#MMADE, R1
+	JSR	PC, PMSG
+	MOV	#SUBNAM, R1	; save its cluster
+	JSR	PC, FATOPN
+	MOV	DECLUS, SUBCLUS
+
+; ---- create INSIDE.TXT inside the subdirectory ----------------------
+
+	MOV	#DATABUF, R2	; fill the data buffer
+	MOV	#MSG, R3
+	MOV	#MLEN, R4
+FILL:	MOVB	(R3)+, (R2)+
+	SOB	R4, FILL
+
+	MOV	SUBCLUS, R0
+	JSR	PC, FATCD	; make SUBDIR current
+	MOV	#FILNAM, R1
+	MOV	#DATABUF, R2
+	MOV	#MLEN, R3
+	JSR	PC, FATCREC
+	MOV	R0, R4
+	TST	R4
+	BEQ	CROK
+	MOV	#MCRERR, R1
+	JSR	PC, PMSG
+	MOV	R4, R0
+	ADD	#60, R0
+	JSR	PC, PUTC
+	JSR	PC, PCRLF
+	HALT
+CROK:	MOV	#MCROK, R1
+	JSR	PC, PMSG
+
+; ---- verify the file + data inside the subdirectory -----------------
+
+	MOV	SUBCLUS, R0
+	JSR	PC, FATCD
+	MOV	#FILNAM, R1
+	JSR	PC, FATOPN
+	TST	R0
+	BEQ	VD1
+	MOV	#MNOIN, R1
+	JSR	PC, PMSG
+	HALT
+VD1:	MOV	#RDBUF, R2
+	JSR	PC, FATRD
+	MOV	R0, R3
+	MOV	#RDBUF, R4
+	MOV	#MSG, R5
+VD:	CLR	R0
+	BISB	(R4)+, R0
+	CLR	R1
+	BISB	(R5)+, R1
+	CMP	R0, R1
+	BNE	VDBAD
+	SOB	R3, VD
+	MOV	#MDATOK, R1
+	JSR	PC, PMSG
+	BR	VROOT
+VDBAD:	MOV	#MDATNO, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- and it must NOT be in the root ---------------------------------
+
+VROOT:	JSR	PC, FATDIR0
+	MOV	#FILNAM, R1
+	JSR	PC, FATOPN
+	TST	R0
+	BNE	RGOOD		; not found in root = correct
+	MOV	#MINROOT, R1
+	JSR	PC, PMSG
+	HALT
+RGOOD:	MOV	#MNROOT, R1
+	JSR	PC, PMSG
+
+; ---- rename it inside the subdirectory ------------------------------
+
+	MOV	SUBCLUS, R0
+	JSR	PC, FATCD
+	MOV	#FILNAM, R1
+	MOV	#FIL2, R2
+	JSR	PC, FATRENC
+	MOV	R0, R4
+	TST	R4
+	BEQ	RNOK
+	MOV	#MRNERR, R1
+	JSR	PC, PMSG
+	MOV	R4, R0
+	ADD	#60, R0
+	JSR	PC, PUTC
+	JSR	PC, PCRLF
+	HALT
+RNOK:	MOV	SUBCLUS, R0	; new name present, old gone?
+	JSR	PC, FATCD
+	MOV	#FIL2, R1
+	JSR	PC, FATOPN
+	TST	R0
+	BEQ	RN2
+	MOV	#MNONEW, R1
+	JSR	PC, PMSG
+	HALT
+RN2:	MOV	SUBCLUS, R0
+	JSR	PC, FATCD
+	MOV	#FILNAM, R1
+	JSR	PC, FATOPN
+	TST	R0
+	BNE	RN3
+	MOV	#MOLDST, R1
+	JSR	PC, PMSG
+	HALT
+RN3:	MOV	#MRNOK, R1
+	JSR	PC, PMSG
+
+; ---- delete it inside the subdirectory ------------------------------
+
+	MOV	SUBCLUS, R0
+	JSR	PC, FATCD
+	MOV	#FIL2, R1
+	JSR	PC, FATDELC
+	MOV	R0, R4
+	TST	R4
+	BEQ	DLOK
+	MOV	#MDLERR, R1
+	JSR	PC, PMSG
+	HALT
+DLOK:	MOV	SUBCLUS, R0	; gone?
+	JSR	PC, FATCD
+	MOV	#FIL2, R1
+	JSR	PC, FATOPN
+	TST	R0
+	BNE	DL2
+	MOV	#MDLST, R1
+	JSR	PC, PMSG
+	HALT
+DL2:	MOV	#MDLOK, R1
+	JSR	PC, PMSG
+
+; ---- remove the now-empty subdirectory ------------------------------
+
+	JSR	PC, FATDIR0
+	MOV	#SUBNAM, R1
+	JSR	PC, FATRMD
+	TST	R0
+	BEQ	DONE
+	MOV	#MRMERR, R1
+	JSR	PC, PMSG
+	HALT
+DONE:	MOV	#MDONE, R1
+	JSR	PC, PMSG
+	HALT
+	JMP	START
+
+; ---- console ---------------------------------------------------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMSG2
+	JSR	PC, PUTC
+	BR	PMSG
+PMSG2:	RTS	PC
+
+PCRLF:	MOV	#15, R0
+	JSR	PC, PUTC
+	MOV	#12, R0
+	JSR	PC, PUTC
+	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+; ---- names, messages, buffers ---------------------------------------
+
+SUBNAM:	.ASCII	/SUBDIR     /	; 8.3: SUBDIR + 5 spaces
+FILNAM:	.ASCII	/INSIDE  TXT/	; INSIDE.TXT
+FIL2:	.ASCII	/RENAMED TXT/	; RENAMED.TXT
+	.EVEN
+
+MSG:	.ASCII	/file created inside a subdirectory/
+	.BYTE	15, 12
+MEND:
+MLEN	= MEND - MSG
+	.EVEN
+
+MHELLO:	.ASCII	/FATSTEST - subdir file create, rename, delete/
+	.BYTE	15, 12, 0
+MNOSD:	.ASCII	/SD INIT FAILED/
+	.BYTE	15, 12, 0
+MNOMNT:	.ASCII	/MOUNT FAILED/
+	.BYTE	15, 12, 0
+MMKERR:	.ASCII	/MKDIR FAILED/
+	.BYTE	15, 12, 0
+MMADE:	.ASCII	/CREATED SUBDIR/
+	.BYTE	15, 12, 0
+MCRERR:	.ASCII	/CREATE IN SUBDIR FAILED, CODE /
+	.BYTE	0
+MCROK:	.ASCII	/CREATED INSIDE.TXT IN SUBDIR/
+	.BYTE	15, 12, 0
+MNOIN:	.ASCII	/INSIDE.TXT NOT FOUND IN SUBDIR/
+	.BYTE	15, 12, 0
+MDATOK:	.ASCII	/DATA INTACT/
+	.BYTE	15, 12, 0
+MDATNO:	.ASCII	/DATA MISMATCH/
+	.BYTE	15, 12, 0
+MINROOT:.ASCII	/ERROR - FILE LEAKED INTO ROOT/
+	.BYTE	15, 12, 0
+MNROOT:	.ASCII	/NOT IN ROOT - OK/
+	.BYTE	15, 12, 0
+MRNERR:	.ASCII	/RENAME IN SUBDIR FAILED, CODE /
+	.BYTE	0
+MNONEW:	.ASCII	/RENAMED.TXT NOT FOUND/
+	.BYTE	15, 12, 0
+MOLDST:	.ASCII	/INSIDE.TXT STILL PRESENT/
+	.BYTE	15, 12, 0
+MRNOK:	.ASCII	/RENAMED INSIDE.TXT -> RENAMED.TXT/
+	.BYTE	15, 12, 0
+MDLERR:	.ASCII	/DELETE IN SUBDIR FAILED/
+	.BYTE	15, 12, 0
+MDLST:	.ASCII	/RENAMED.TXT STILL PRESENT/
+	.BYTE	15, 12, 0
+MDLOK:	.ASCII	/DELETED RENAMED.TXT/
+	.BYTE	15, 12, 0
+MRMERR:	.ASCII	/RMDIR SUBDIR FAILED/
+	.BYTE	15, 12, 0
+MDONE:	.ASCII	/--- DONE (subdir writes, card clean)/
+	.BYTE	15, 12, 0
+	.EVEN
+
+DATABUF:.BLKB	^D512
+	.EVEN
+RDBUF:	.BLKB	^D512
+	.EVEN
+SUBCLUS:.WORD	0
+
+	.INCLUDE "../fat16/fat16.mac"
+	.INCLUDE "../sddrv/sd.mac"
+
+	.END	START

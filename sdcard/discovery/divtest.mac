@@ -1,0 +1,194 @@
+; divtest.mac — isolate the EIS DIV behaviour in m11asm / J-11
+;
+; DIV divides a 32-bit dividend held in a register PAIR (Rn even = HIGH
+; word, Rn+1 = LOW word) by a 16-bit divisor; quotient -> Rn, remainder
+; -> Rn+1. m11asm writes EIS register-first (like "MUL Rn, src"), so
+; "DIV Rn, src". IMPORTANT: DIV is SIGNED, so the quotient must fit in
+; -32768..32767; a bigger quotient sets V (overflow) and the result is
+; indeterminate. These cases straddle that boundary.
+;
+; Prints Q (quotient), R (remainder) and V (overflow flag) for each.
+;
+; Assemble:	origin 1000; run with P or 1000G.
+
+.	= 1000
+
+XCSR	= 177564
+XBUF	= 177566
+
+START:	MOV	#340, @#177776
+	MOV	#1000, SP
+	MOV	#MHELLO, R1
+	JSR	PC, PMSG
+
+; A: 100 / 7 -> Q=000E R=0002 V=0  (fits)
+	MOV	#MA, R1
+	JSR	PC, PMSG
+	CLR	R2
+	MOV	#^D100, R3
+	DIV	R2, #^D7
+	BVS	VSA		; test V FIRST (branches don't touch flags)
+	CLR	VF
+	BR	VLA
+VSA:	MOV	#1, VF
+VLA:	JSR	PC, PQR
+
+; B: 100 / 7, memory divisor -> Q=000E R=0002 V=0
+	MOV	#MB, R1
+	JSR	PC, PMSG
+	CLR	R2
+	MOV	#^D100, R3
+	DIV	R2, DV7
+	BVS	VSB
+	CLR	VF
+	BR	VLB
+VSB:	MOV	#1, VF
+VLB:	JSR	PC, PQR
+
+; C: 65536 / 2 = 32768 -> quotient 0x8000 does NOT fit signed -> V=1
+	MOV	#MC, R1
+	JSR	PC, PMSG
+	MOV	#1, R2
+	CLR	R3
+	DIV	R2, #^D2
+	BVS	VSC
+	CLR	VF
+	BR	VLC
+VSC:	MOV	#1, VF
+VLC:	JSR	PC, PQR
+
+; D: 3905232 / 64 = 61019 -> way over 32767 -> V=1 (the fat16 case)
+	MOV	#MD, R1
+	JSR	PC, PMSG
+	MOV	#^D59, R2
+	MOV	#^D39632, R3
+	DIV	R2, #^D64
+	BVS	VSD
+	CLR	VF
+	BR	VLD
+VSD:	MOV	#1, VF
+VLD:	JSR	PC, PQR
+
+; E: 32766 / 1 -> Q=7FFE R=0000 V=0  (just fits signed)
+	MOV	#ME, R1
+	JSR	PC, PMSG
+	CLR	R2
+	MOV	#^D32766, R3
+	DIV	R2, #^D1
+	BVS	VSE
+	CLR	VF
+	BR	VLE
+VSE:	MOV	#1, VF
+VLE:	JSR	PC, PQR
+
+; F: 32768 / 1 -> quotient 0x8000 overflows signed -> V=1
+	MOV	#MF, R1
+	JSR	PC, PMSG
+	CLR	R2
+	MOV	#^O100000, R3		; 0x8000 = 32768
+	DIV	R2, #^D1
+	BVS	VSF
+	CLR	VF
+	BR	VLF
+VSF:	MOV	#1, VF
+VLF:	JSR	PC, PQR
+
+	HALT
+	JMP	START
+
+; ---- print "Q=xxxx R=xxxx V=x" ; stack: (SP)=R3, 2(SP)=R2, 4(SP)=ret -
+
+PQR:	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	MOV	#MQ, R1
+	JSR	PC, PMSG
+	MOV	2(SP), R0		; quotient (saved R2)
+	JSR	PC, PHEX4
+	MOV	#MRR, R1
+	JSR	PC, PMSG
+	MOV	(SP), R0		; remainder (saved R3)
+	JSR	PC, PHEX4
+	MOV	#MVV, R1
+	JSR	PC, PMSG
+	MOV	VF, R0
+	ADD	#60, R0
+	JSR	PC, PUTC
+	JSR	PC, PCRLF
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	RTS	PC
+
+; ---- console ---------------------------------------------------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMSG2
+	JSR	PC, PUTC
+	BR	PMSG
+PMSG2:	RTS	PC
+
+PCRLF:	MOV	#15, R0
+	JSR	PC, PUTC
+	MOV	#12, R0
+	JSR	PC, PUTC
+	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+PHEX4:	MOV	R0, -(SP)
+	SWAB	R0
+	JSR	PC, PHEX2
+	MOV	(SP)+, R0
+	JSR	PC, PHEX2
+	RTS	PC
+
+PHEX2:	BIC	#177400, R0
+	MOV	R0, -(SP)
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	ASR	R0
+	JSR	PC, PNIB
+	MOV	(SP)+, R0
+	JSR	PC, PNIB
+	RTS	PC
+
+PNIB:	BIC	#177760, R0
+	CMP	R0, #^D9
+	BGT	PNA
+	ADD	#60, R0
+	BR	PNP
+PNA:	ADD	#^D55, R0
+PNP:	JSR	PC, PUTC
+	RTS	PC
+
+; ---- data -----------------------------------------------------------
+
+VF:	.WORD	0
+DV7:	.WORD	^D7
+
+MHELLO:	.ASCII	/DIVTEST - EIS DIV is SIGNED (quotient must fit +-32767)/
+	.BYTE	15, 12, 0
+MA:	.ASCII	/A 100 by 7 imm  exp Q=000E R=0002 V=0  /
+	.BYTE	0
+MB:	.ASCII	/B 100 by 7 mem  exp Q=000E R=0002 V=0  /
+	.BYTE	0
+MC:	.ASCII	/C 65536 by 2    exp overflow      V=1  /
+	.BYTE	0
+MD:	.ASCII	/D 3905232 by 64 exp overflow      V=1  /
+	.BYTE	0
+ME:	.ASCII	/E 32766 by 1    exp Q=7FFE R=0000 V=0  /
+	.BYTE	0
+MF:	.ASCII	/F 32768 by 1    exp overflow      V=1  /
+	.BYTE	0
+MQ:	.ASCII	/Q=/
+	.BYTE	0
+MRR:	.ASCII	/ R=/
+	.BYTE	0
+MVV:	.ASCII	/ V=/
+	.BYTE	0
+	.EVEN
+
+	.END	START

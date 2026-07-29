@@ -1,0 +1,207 @@
+; fatrtest.mac — FAT16 remove-directory test (fat16.mac FATRMD)
+;
+; Makes RMDIR (an empty subdirectory), then injects a directory entry
+; straight into its cluster (raw SDRD/SDWR via CLBA) so the directory is
+; non-empty, confirms FATRMD REFUSES it (code 3, not empty), clears the
+; injected entry, and confirms FATRMD then removes the empty directory.
+; Self-cleaning and re-runnable.
+;
+; Assemble:	part of fatrtest.prj (origin 1000); run with P or 1000G.
+
+.	= 1000
+
+XCSR	= 177564		; console transmit status (bit 7 = ready)
+XBUF	= 177566		; console transmit buffer
+
+START:	MOV	#340, @#177776	; priority 7
+	MOV	#1000, SP
+	MOV	#MHELLO, R1
+	JSR	PC, PMSG
+
+	JSR	PC, SDINI
+	TST	R0
+	BEQ	MOUNT
+	MOV	#MNOSD, R1
+	JSR	PC, PMSG
+	HALT
+MOUNT:	JSR	PC, FATMNT
+	TST	R0
+	BEQ	MKD
+	MOV	#MNOMNT, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- make the directory ---------------------------------------------
+
+MKD:	MOV	#DNAME, R1	; clear any leftover
+	JSR	PC, FATDEL
+
+	MOV	#DNAME, R1
+	JSR	PC, FATMKD
+	TST	R0
+	BEQ	MKOK
+	MOV	#MMERR, R1
+	JSR	PC, PMSG
+	HALT
+MKOK:	MOV	#MMADE, R1
+	JSR	PC, PMSG
+
+; ---- inject a fake entry so the directory is non-empty --------------
+
+	MOV	#DNAME, R1	; DECLUS = the directory's cluster
+	JSR	PC, FATOPN
+	MOV	DECLUS, R0
+	JSR	PC, CLBA	; R0:R1 = its first LBA
+	MOV	R0, SLBA
+	MOV	R1, SHI
+	MOV	#BUF, R2
+	JSR	PC, SDRD	; read the "." / ".." sector
+	TST	R0
+	BNE	RAWER
+	MOV	#BUF+100, R2	; entry slot 2 (offset 0x40)
+	MOV	#DUMMY, R3
+	MOV	#^D11, R4
+INJ:	MOVB	(R3)+, (R2)+
+	SOB	R4, INJ
+	MOVB	#40, BUF+113	; attr 0x20 (archive) at slot+0x0B
+	MOV	SLBA, R0
+	MOV	SHI, R1
+	MOV	#BUF, R2
+	JSR	PC, SDWR
+	TST	R0
+	BNE	RAWER
+
+; ---- FATRMD must refuse (not empty) ---------------------------------
+
+	MOV	#DNAME, R1
+	JSR	PC, FATRMD
+	MOV	R0, R4
+	CMP	R4, #3
+	BEQ	NEOK
+	MOV	#MNE3, R1	; expected 3, got something else
+	JSR	PC, PMSG
+	MOV	R4, R0
+	ADD	#60, R0
+	JSR	PC, PUTC
+	JSR	PC, PCRLF
+	HALT
+NEOK:	MOV	#MREF, R1
+	JSR	PC, PMSG
+	MOV	#DNAME, R1	; and it must still be there
+	JSR	PC, FATOPN
+	TST	R0
+	BEQ	CLRDUM
+	MOV	#MVANI, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- clear the fake entry -> directory empty again ------------------
+
+CLRDUM:	MOV	SLBA, R0
+	MOV	SHI, R1
+	MOV	#BUF, R2
+	JSR	PC, SDRD
+	TST	R0
+	BNE	RAWER
+	CLRB	BUF+100		; slot 2 first byte = 0x00 (end)
+	MOV	SLBA, R0
+	MOV	SHI, R1
+	MOV	#BUF, R2
+	JSR	PC, SDWR
+	TST	R0
+	BNE	RAWER
+
+; ---- FATRMD must now succeed ----------------------------------------
+
+	MOV	#DNAME, R1
+	JSR	PC, FATRMD
+	MOV	R0, R4
+	TST	R4
+	BEQ	RMOK
+	MOV	#MRMER, R1
+	JSR	PC, PMSG
+	MOV	R4, R0
+	ADD	#60, R0
+	JSR	PC, PUTC
+	JSR	PC, PCRLF
+	HALT
+RMOK:	MOV	#MREM, R1
+	JSR	PC, PMSG
+	MOV	#DNAME, R1	; and it must be gone
+	JSR	PC, FATOPN
+	TST	R0
+	BNE	GONE
+	MOV	#MSTILL, R1
+	JSR	PC, PMSG
+	HALT
+GONE:	MOV	#MDONE, R1
+	JSR	PC, PMSG
+	HALT
+	JMP	START
+
+RAWER:	MOV	#MRAW, R1
+	JSR	PC, PMSG
+	HALT
+
+; ---- console ---------------------------------------------------------
+
+PMSG:	MOVB	(R1)+, R0
+	BEQ	PMSG2
+	JSR	PC, PUTC
+	BR	PMSG
+PMSG2:	RTS	PC
+
+PCRLF:	MOV	#15, R0
+	JSR	PC, PUTC
+	MOV	#12, R0
+	JSR	PC, PUTC
+	RTS	PC
+
+PUTC:	TSTB	@#XCSR
+	BPL	PUTC
+	MOVB	R0, @#XBUF
+	RTS	PC
+
+; ---- names and messages ---------------------------------------------
+
+DNAME:	.ASCII	/RMDIR      /	; 8.3: RMDIR + 6 spaces
+DUMMY:	.ASCII	/DUMMY   TXT/	; the injected fake entry
+	.EVEN
+
+MHELLO:	.ASCII	/FATRTEST - remove directory RMDIR/
+	.BYTE	15, 12, 0
+MNOSD:	.ASCII	/SD INIT FAILED/
+	.BYTE	15, 12, 0
+MNOMNT:	.ASCII	/MOUNT FAILED/
+	.BYTE	15, 12, 0
+MMERR:	.ASCII	/MKDIR FAILED/
+	.BYTE	15, 12, 0
+MMADE:	.ASCII	/CREATED RMDIR/
+	.BYTE	15, 12, 0
+MRAW:	.ASCII	/RAW SD ERROR/
+	.BYTE	15, 12, 0
+MNE3:	.ASCII	/EXPECTED CODE 3, GOT /
+	.BYTE	0
+MREF:	.ASCII	/REFUSED NON-EMPTY DIR - OK/
+	.BYTE	15, 12, 0
+MVANI:	.ASCII	/DIR VANISHED ON REFUSAL/
+	.BYTE	15, 12, 0
+MRMER:	.ASCII	/REMOVE FAILED, CODE /
+	.BYTE	0
+MREM:	.ASCII	/REMOVED EMPTY DIR/
+	.BYTE	15, 12, 0
+MSTILL:	.ASCII	/STILL PRESENT AFTER REMOVE/
+	.BYTE	15, 12, 0
+MDONE:	.ASCII	/--- DONE (refused non-empty, removed empty)/
+	.BYTE	15, 12, 0
+	.EVEN
+
+BUF:	.BLKB	^D512
+	.EVEN
+SLBA:	.WORD	0
+SHI:	.WORD	0
+
+	.INCLUDE "../fat16/fat16.mac"
+	.INCLUDE "../sddrv/sd.mac"
+
+	.END	START

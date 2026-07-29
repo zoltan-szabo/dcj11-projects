@@ -3,6 +3,19 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: reorganised into a proper project (2026-07-29)
+
+The directory had grown to ~45 files in one flat folder. Split it into
+`sddrv/` (sd.mac), `fat16/` (fat16.mac + a new full reference fat16.md),
+`sample/` (sdls — mount and list the root directory, the "hello world"
+of the layer), and `discovery/` (all 15 dev-cycle programs, including
+the divtest DIV probe). Confirmed m11asm resolves `.INCLUDE` relative to
+the including file, so the discovery tests include the modules via
+`../fat16/…` / `../sddrv/…` and still assemble in place; J11Terminal
+handles the subfolder paths in the `.prj` file lists too. README rewritten
+as an overview pointing at fat16.md; build artifacts (.oct/.lst/.sym,
+never tracked) cleaned out. No code changed — pure reorganisation.
+
 ## sdcard: FAT16 free-cluster bound + a DIV gotcha (2026-07-29)
 
 FATFREE was bounded only by the FAT's size in sectors, so on a full
