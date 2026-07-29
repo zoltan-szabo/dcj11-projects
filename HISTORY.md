@@ -3,6 +3,21 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: FAT16 file create (2026-07-29)
+
+First creation of a file from the J-11. FATCRE (R1 name, R2 512-byte
+data buffer, R3 length) builds a small single-cluster file in the root:
+reject if the name already exists (FATOPN), FATFREE a cluster and
+FATWEN it to EOC, FATSLOT a free 32-byte directory slot (first byte 0x00
+never-used or 0xE5 deleted), zero the entry and fill name / attr 0x20 /
+first-cluster-low (0x1A) / size (0x1C), write the directory sector back,
+then write the one data sector. One cluster / one sector for now
+(length <= 512); no extend, no delete, root only. FATSLOT is the genuinely
+new primitive. `fatctest.mac` creates PDPFILE.TXT, reads it back, and
+verifies; re-runnable (2nd run reports "exists" and verifies the
+persisted copy). Hardware: "CREATED / VERIFIED", contents correct, and
+the file appears on the card when read on a PC.
+
 ## sdcard: FAT16 allocation primitives (2026-07-29)
 
 The shared foundation for file create/extend and delete: FATWEN (write

@@ -2,10 +2,10 @@
 ;
 ; Mounts the first MBR partition, reads its BPB, computes the on-disk
 ; geometry, and offers a directory iterator (root or any subdirectory),
-; whole-file reading, overwrite-in-place, and the FAT allocation
-; primitives (free-cluster search + FAT-entry write). No file create /
-; extend / delete or directory writes yet. 8.3 names only (long-name
-; entries are skipped).
+; whole-file reading, overwrite-in-place, the FAT allocation primitives
+; (free-cluster search + FAT-entry write), and small single-cluster file
+; creation in the root. No extend past one cluster, no delete, and no
+; subdirectory writes yet. 8.3 names only (long-name entries skipped).
 ;
 ; All sector numbers are 32-bit LBAs, held as word pairs (low, high) and
 ; passed to sd.mac's SDRD in the R0:R1 register pair. Cluster arithmetic
@@ -37,6 +37,10 @@
 ;		FAT copy -> R0 = 0 ok / 1 error. (Allocation primitive.)
 ;	FATFREE	find a free cluster -> R0 = cluster number, 0 if none.
 ;	(FATNX R0=cluster -> R0 = the entry's value is the FAT reader.)
+;	FATCRE	R1 -> 8.3 name, R2 -> 512-byte data buffer, R3 = length;
+;		create a small file (<= 512 bytes, one cluster) in the
+;		root -> R0 = 0 ok / 2 exists / 3 no cluster / 4 dir full /
+;		5 too big / 6 write error.
 ;
 ; Directory attribute bits: 0x10 dir, 0x08 volume label, 0x0F long name.
 
@@ -480,6 +484,122 @@ FFR3:	ADD	#2, R2
 FFRNONE:	CLR	R0
 	RTS	PC
 
+; ---- find a free root-directory slot -------------------------------
+; Scans the fixed root region for an entry marked free (0x00 = never
+; used) or deleted (0xE5). On success FATBUF holds that sector, DSLBA/
+; DSHI = its LBA, DSOFF = the entry's byte offset in FATBUF. R0 = 0 ok /
+; 1 = directory full. Root only.
+
+FATSLOT:CLR	R4			; root sector index
+FSL1:	CMP	R4, RDSEC
+	BHIS	FSLNON
+	MOV	ROOTLBA, R0
+	MOV	ROOTLBA+2, R1
+	ADD	R4, R0
+	ADC	R1
+	MOV	R0, DSLBA
+	MOV	R1, DSHI
+	MOV	#FATBUF, R2
+	JSR	PC, SDRD
+	CLR	DLOADED
+	TST	R0
+	BNE	FSLNON
+	MOV	#FATBUF, R2		; scan the 16 entries
+	CLR	R3
+FSL2:	CLR	R0
+	BISB	(R2), R0
+	BEQ	FSLGOT			; 0x00 never used
+	CMP	R0, #345		; 0xE5 deleted
+	BEQ	FSLGOT
+	ADD	#40, R2			; next entry (32 bytes)
+	INC	R3
+	CMP	R3, #^D16
+	BLO	FSL2
+	INC	R4
+	BR	FSL1
+FSLGOT:	MOV	R2, R0			; byte offset in FATBUF
+	SUB	#FATBUF, R0
+	MOV	R0, DSOFF
+	CLR	R0
+	RTS	PC
+FSLNON:	MOV	#1, R0
+	RTS	PC
+
+; ---- create a small file in the root directory ---------------------
+; R1 -> 11-byte 8.3 name, R2 -> a 512-byte data buffer, R3 = length in
+; bytes. ONE cluster / ONE sector for now (length <= 512): allocates a
+; cluster, marks it EOC, writes a directory entry, and writes the data.
+; Returns R0 = 0 ok / 2 already exists / 3 no free cluster / 4 dir full
+; / 5 too big / 6 write error.
+
+FATCRE:	MOV	R1, CRNAME
+	MOV	R2, CRDATA
+	MOV	R3, CRLEN
+	CMP	R3, #^D512		; single-sector limit for now
+	BLOS	FCR0
+	MOV	#5, R0
+	RTS	PC
+FCR0:	JSR	PC, FATDIR0		; create in (and search) the root
+	MOV	CRNAME, R1		; already present?
+	JSR	PC, FATOPN
+	TST	R0
+	BNE	FCR1
+	MOV	#2, R0
+	RTS	PC
+FCR1:	JSR	PC, FATFREE		; allocate the first cluster
+	TST	R0
+	BNE	FCR2
+	MOV	#3, R0
+	RTS	PC
+FCR2:	MOV	R0, CRCLUS
+	MOV	#177777, R1		; mark it end-of-chain
+	JSR	PC, FATWEN
+	TST	R0
+	BEQ	FCR3
+	MOV	#6, R0
+	RTS	PC
+FCR3:	JSR	PC, FATSLOT		; a place for the directory entry
+	TST	R0
+	BEQ	FCR4
+	MOV	CRCLUS, R0		; dir full: give the cluster back
+	CLR	R1
+	JSR	PC, FATWEN
+	MOV	#4, R0
+	RTS	PC
+FCR4:	MOV	#FATBUF, R3		; zero the 32-byte entry
+	ADD	DSOFF, R3
+	MOV	R3, R2
+	MOV	#^D16, R4
+FCZ:	CLR	(R2)+
+	SOB	R4, FCZ
+	MOV	R3, R2			; name (11 bytes)
+	MOV	CRNAME, R4
+	MOV	#^D11, R5
+FCN:	MOVB	(R4)+, (R2)+
+	SOB	R5, FCN
+	MOVB	#40, 13(R3)		; 0x0B attribute = 0x20 (archive)
+	MOV	CRCLUS, 32(R3)		; 0x1A first cluster low
+	MOV	CRLEN, 34(R3)		; 0x1C size low
+	CLR	36(R3)			; 0x1E size high
+	MOV	DSLBA, R0		; write the directory sector back
+	MOV	DSHI, R1
+	MOV	#FATBUF, R2
+	JSR	PC, SDWR
+	TST	R0
+	BEQ	FCR5
+	MOV	#6, R0
+	RTS	PC
+FCR5:	MOV	CRCLUS, R0		; write the one data sector
+	JSR	PC, CLBA
+	MOV	CRDATA, R2
+	JSR	PC, SDWR
+	TST	R0
+	BEQ	FCR6
+	MOV	#6, R0
+	RTS	PC
+FCR6:	CLR	R0
+	RTS	PC
+
 ; ---- little-endian readers from a (maybe odd) byte pointer R1 ------
 ; RDW -> R0 = 16-bit LE word.  RDB -> R0 = zero-extended byte.  Keep R1.
 
@@ -522,6 +642,13 @@ WVAL:	.WORD	0		; FATWEN: value being written
 WBOFF:	.WORD	0		;         byte offset in the FAT sector
 F1LO:	.WORD	0		;         FAT-copy-1 sector LBA (low)
 F1HI:	.WORD	0		;         FAT-copy-1 sector LBA (high)
+DSLBA:	.WORD	0		; FATSLOT: slot sector LBA (low)
+DSHI:	.WORD	0		;          slot sector LBA (high)
+DSOFF:	.WORD	0		;          slot byte offset in FATBUF
+CRNAME:	.WORD	0		; FATCRE: name pointer
+CRDATA:	.WORD	0		;         data buffer pointer
+CRLEN:	.WORD	0		;         length in bytes
+CRCLUS:	.WORD	0		;         allocated first cluster
 DENAME:	.BLKB	^D11		; current entry name (8.3, space padded)
 	.EVEN
 FATBUF:	.BLKB	^D512		; one sector: MBR / BPB / dir / FAT

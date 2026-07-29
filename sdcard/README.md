@@ -13,10 +13,11 @@ FAT16 (mount, walk root *and* subdirectories, read files, and
 **overwrite a file in place**) are all hardware-verified — the PDP-11
 mounts a formatted card, walks the tree, dumps a file, round-trips a
 scratch-sector write, and overwrites `TEST.TXT` (verified on a PC
-afterward). FAT can overwrite existing data (same size, no FAT/dir
-change), and the allocation primitives (free-cluster search + FAT-entry
-write to both copies) are verified reversibly. It does not yet create,
-extend, or delete files. 8.3 names only.
+afterward). FAT can overwrite existing data in place, the allocation
+primitives (free-cluster search + FAT-entry write to both copies) are
+verified reversibly, and it can **create** a small single-cluster file
+in the root (directory entry + data). It does not yet extend past one
+cluster, delete, or write subdirectories. 8.3 names only.
 
 ## Wiring (VIA port B)
 
@@ -62,6 +63,20 @@ A bare passive adapter would need external 3.3 V + level shifting.
   restore it — reversibly, so the FAT ends unchanged.
 - `sdtest.prj` / `sdwtest.prj` / `fattest.prj` / `fatwtest.prj` /
   `fatatest.prj` — J11Terminal projects (origin 1000).
+
+## Projects (which `.prj` does what)
+
+Each `.prj` is a self-contained J11Terminal project (origin 1000) that
+builds one test program on top of `sd.mac` / `fat16.mac`.
+
+| Project | What it exercises |
+|---------|-------------------|
+| `sdtest.prj`  | Raw SD bring-up: CMD0 wiring probe, init, capacity class, sector-0 hex dump (the MBR) |
+| `sdwtest.prj` | Raw sector **write**: pattern → scratch LBA 100 → read back → verify; saves/restores the sector |
+| `fattest.prj` | FAT16 mount + geometry, recursive **directory-tree** walk, dump the first file |
+| `fatwtest.prj`| FAT16 **overwrite** `TEST.TXT` in place (same length), read back, verify |
+| `fatatest.prj`| FAT16 **allocation** primitives: `FATFREE` + `FATWEN` a cluster to EOC in both FAT copies, verify, restore (reversible) |
+| `fatctest.prj`| FAT16 file **create**: make `PDPFILE.TXT` (allocate cluster + write directory entry + data), read back, verify (re-runnable; leaves the file on the card) |
 
 ## Using it
 
