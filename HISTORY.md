@@ -3,6 +3,18 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: FAT16 rename (2026-07-29)
+
+FATREN (R1 old name, R2 new name): the smallest write op - FATOPN the
+old name (the iterator records the entry's DELBA/DEHI/DEOFF), confirm the
+new name doesn't already exist, then re-read the entry's sector,
+overwrite just the 11 name bytes in place, write it back. No FAT touch,
+no data move. Root only. `fatntest.mac` creates RENFROM.TXT, renames to
+RENTO.TXT, verifies the new name carries the same data and the old is
+gone, then deletes. Hardware: clean first run. Reuses exactly the
+entry-location tracking added for delete - which is turning into the
+general "edit a directory entry" primitive.
+
 ## sdcard: FAT16 multi-cluster create + a latent chain-walk bug (2026-07-29)
 
 FATCRE generalised: the data-write half now allocates and links a
