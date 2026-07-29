@@ -1,0 +1,18 @@
+{
+  "build" : {
+    "autosave" : true,
+    "lstPageBreaks" : false,
+    "makeLst" : true,
+    "makeSym" : true,
+    "outputDir" : "."
+  },
+  "files" : [
+    "fatdtest.mac",
+    "fat16.mac",
+    "sd.mac"
+  ],
+  "main" : "fatdtest.mac",
+  "name" : "fatdtest",
+  "origin" : "1000",
+  "schema" : 1
+}

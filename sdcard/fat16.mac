@@ -4,7 +4,7 @@
 ; geometry, and offers a directory iterator (root or any subdirectory),
 ; whole-file reading, overwrite-in-place, the FAT allocation primitives
 ; (free-cluster search + FAT-entry write), and small single-cluster file
-; creation in the root. No extend past one cluster, no delete, and no
+; create + delete in the root. No extend past one cluster and no
 ; subdirectory writes yet. 8.3 names only (long-name entries skipped).
 ;
 ; All sector numbers are 32-bit LBAs, held as word pairs (low, high) and
@@ -41,6 +41,9 @@
 ;		create a small file (<= 512 bytes, one cluster) in the
 ;		root -> R0 = 0 ok / 2 exists / 3 no cluster / 4 dir full /
 ;		5 too big / 6 write error.
+;	FATDEL	R1 -> 8.3 name; delete the file from the root: free its
+;		cluster chain and mark the entry 0xE5 -> R0 = 0 ok / 1 not
+;		found / 2 write error.
 ;
 ; Directory attribute bits: 0x10 dir, 0x08 volume label, 0x0F long name.
 
@@ -241,7 +244,9 @@ FNSUB1:	CMP	DCLUS, #2		; end of the chain?
 	JSR	PC, CLBA
 	ADD	DSEC, R0
 	ADC	R1
-FNLOAD:	MOV	#FATBUF, R2
+FNLOAD:	MOV	R0, DELBA		; remember this dir sector's LBA,
+	MOV	R1, DEHI		; so a matched entry can be written
+	MOV	#FATBUF, R2
 	JSR	PC, SDRD
 	TST	R0
 	BNE	FNEND
@@ -279,6 +284,8 @@ FNCP:	MOVB	(R3)+, (R4)+
 	MOV	32(R2), DECLUS		; 0x1A first cluster (low)  [octal 32]
 	MOV	34(R2), DESIZE		; 0x1C size low             [octal 34]
 	MOV	36(R2), DESIZE+2	; 0x1E size high            [octal 36]
+	MOV	R2, DEOFF		; entry's byte offset in FATBUF,
+	SUB	#FATBUF, DEOFF		; paired with DELBA/DEHI above
 	CLR	R0
 	RTS	PC
 FNEND:	MOV	#1, R0
@@ -600,6 +607,56 @@ FCR5:	MOV	CRCLUS, R0		; write the one data sector
 FCR6:	CLR	R0
 	RTS	PC
 
+; ---- delete a file: R1 -> 11-byte 8.3 name -------------------------
+; Frees the file's whole cluster chain (each entry -> 0x0000) and marks
+; its directory entry deleted (0xE5). Root only. The iterator recorded
+; the entry's location (DELBA/DEHI/DEOFF) and first cluster (FCLUS) when
+; FATOPN matched it. Returns R0 = 0 ok / 1 not found / 2 write error.
+
+FATDEL:	MOV	R1, CRNAME
+	JSR	PC, FATDIR0
+	MOV	CRNAME, R1
+	JSR	PC, FATOPN
+	TST	R0
+	BEQ	FD1
+	MOV	#1, R0
+	RTS	PC
+FD1:	MOV	FCLUS, CHCUR		; walk and free the chain
+FDCH:	CMP	CHCUR, #2
+	BLO	FDMARK
+	CMP	CHCUR, #177770		; 0xFFF8 end-of-chain
+	BHIS	FDMARK
+	MOV	CHCUR, R0		; next = FATNX(cur) BEFORE freeing cur
+	JSR	PC, FATNX
+	MOV	R0, CHNXT
+	MOV	CHCUR, R0		; free cur
+	CLR	R1
+	JSR	PC, FATWEN
+	TST	R0
+	BNE	FDERR
+	MOV	CHNXT, CHCUR
+	BR	FDCH
+FDMARK:	MOV	DELBA, R0		; mark the directory entry deleted
+	MOV	DEHI, R1
+	MOV	#FATBUF, R2
+	JSR	PC, SDRD
+	CLR	DLOADED
+	TST	R0
+	BNE	FDERR
+	MOV	#FATBUF, R3
+	ADD	DEOFF, R3
+	MOVB	#345, (R3)		; 0xE5
+	MOV	DELBA, R0
+	MOV	DEHI, R1
+	MOV	#FATBUF, R2
+	JSR	PC, SDWR
+	TST	R0
+	BNE	FDERR
+	CLR	R0
+	RTS	PC
+FDERR:	MOV	#2, R0
+	RTS	PC
+
 ; ---- little-endian readers from a (maybe odd) byte pointer R1 ------
 ; RDW -> R0 = 16-bit LE word.  RDB -> R0 = zero-extended byte.  Keep R1.
 
@@ -649,6 +706,11 @@ CRNAME:	.WORD	0		; FATCRE: name pointer
 CRDATA:	.WORD	0		;         data buffer pointer
 CRLEN:	.WORD	0		;         length in bytes
 CRCLUS:	.WORD	0		;         allocated first cluster
+DELBA:	.WORD	0		; matched entry's sector LBA (low)
+DEHI:	.WORD	0		;                            (high)
+DEOFF:	.WORD	0		; matched entry's byte offset in FATBUF
+CHCUR:	.WORD	0		; FATDEL: chain cursor
+CHNXT:	.WORD	0		;         next cluster in the chain
 DENAME:	.BLKB	^D11		; current entry name (8.3, space padded)
 	.EVEN
 FATBUF:	.BLKB	^D512		; one sector: MBR / BPB / dir / FAT

@@ -3,6 +3,21 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: FAT16 file delete (2026-07-29)
+
+FATDEL (R1 name): FATOPN the file, walk its cluster chain freeing each
+entry to 0x0000 (read the next link with FATNX BEFORE writing 0 to the
+current, or the chain is lost), then mark the directory entry 0xE5.
+Enabler: FATNXT now records each matched entry's location - the sector
+LBA (DELBA/DEHI, saved at load) and byte offset in FATBUF (DEOFF, saved
+at the valid-entry return) - so FATDEL knows which directory byte to
+overwrite. That also unblocks any future in-place entry edit. `fatdtest`
+is self-cleaning: create DELME.TXT, confirm present, delete, confirm
+gone. Hardware: clean round trip, card unchanged. That completes the
+core FAT16 write set - create, overwrite-in-place, delete - all
+hardware-verified. Remaining: extend past one cluster (multi-cluster
+chains) and subdirectory writes.
+
 ## sdcard: FAT16 file create (2026-07-29)
 
 First creation of a file from the J-11. FATCRE (R1 name, R2 512-byte

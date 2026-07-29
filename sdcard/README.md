@@ -15,9 +15,10 @@ mounts a formatted card, walks the tree, dumps a file, round-trips a
 scratch-sector write, and overwrites `TEST.TXT` (verified on a PC
 afterward). FAT can overwrite existing data in place, the allocation
 primitives (free-cluster search + FAT-entry write to both copies) are
-verified reversibly, and it can **create** a small single-cluster file
-in the root (directory entry + data). It does not yet extend past one
-cluster, delete, or write subdirectories. 8.3 names only.
+verified reversibly, and it can **create and delete** small
+single-cluster files in the root (directory entry + data + chain
+free/mark). It does not yet extend past one cluster or write
+subdirectories. 8.3 names only.
 
 ## Wiring (VIA port B)
 
@@ -77,6 +78,7 @@ builds one test program on top of `sd.mac` / `fat16.mac`.
 | `fatwtest.prj`| FAT16 **overwrite** `TEST.TXT` in place (same length), read back, verify |
 | `fatatest.prj`| FAT16 **allocation** primitives: `FATFREE` + `FATWEN` a cluster to EOC in both FAT copies, verify, restore (reversible) |
 | `fatctest.prj`| FAT16 file **create**: make `PDPFILE.TXT` (allocate cluster + write directory entry + data), read back, verify (re-runnable; leaves the file on the card) |
+| `fatdtest.prj`| FAT16 file **delete**: create `DELME.TXT`, confirm present, `FATDEL` it, confirm gone (frees the chain + marks the entry 0xE5; self-cleaning) |
 
 ## Using it
 
