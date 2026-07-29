@@ -14,7 +14,9 @@ FAT16 (mount, walk root *and* subdirectories, read files, and
 mounts a formatted card, walks the tree, dumps a file, round-trips a
 scratch-sector write, and overwrites `TEST.TXT` (verified on a PC
 afterward). FAT can overwrite existing data (same size, no FAT/dir
-change); it does not yet create, extend, or delete. 8.3 names only.
+change), and the allocation primitives (free-cluster search + FAT-entry
+write to both copies) are verified reversibly. It does not yet create,
+extend, or delete files. 8.3 names only.
 
 ## Wiring (VIA port B)
 
@@ -55,8 +57,11 @@ A bare passive adapter would need external 3.3 V + level shifting.
 - `fatwtest.mac` — FAT overwrite test: rewrite `TEST.TXT` in place with
   a same-length pattern via `FATWR`, read back, verify (leaves the file
   changed so it can be confirmed on a PC).
-- `sdtest.prj` / `sdwtest.prj` / `fattest.prj` / `fatwtest.prj` —
-  J11Terminal projects (origin 1000).
+- `fatatest.mac` — FAT allocation test: `FATFREE` a cluster, confirm
+  it's free, `FATWEN` an EOC marker into both FAT copies, verify, then
+  restore it — reversibly, so the FAT ends unchanged.
+- `sdtest.prj` / `sdwtest.prj` / `fattest.prj` / `fatwtest.prj` /
+  `fatatest.prj` — J11Terminal projects (origin 1000).
 
 ## Using it
 

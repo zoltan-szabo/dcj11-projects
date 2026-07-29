@@ -1,9 +1,10 @@
 ; fat16.mac — read-only FAT16 on top of sd.mac (raw SD sector I/O)
 ;
 ; Mounts the first MBR partition, reads its BPB, computes the on-disk
-; geometry, and offers a directory iterator (root or any subdirectory)
-; plus whole-file reading by following the FAT cluster chain. Read-only:
-; no allocation, no directory or FAT writes. 8.3 names only (long-name
+; geometry, and offers a directory iterator (root or any subdirectory),
+; whole-file reading, overwrite-in-place, and the FAT allocation
+; primitives (free-cluster search + FAT-entry write). No file create /
+; extend / delete or directory writes yet. 8.3 names only (long-name
 ; entries are skipped).
 ;
 ; All sector numbers are 32-bit LBAs, held as word pairs (low, high) and
@@ -32,6 +33,10 @@
 ;		extends/allocates; stops at the file's existing size, so
 ;		the FAT and directory are left untouched. Re-open (FATOPN)
 ;		before switching between reading and writing a file.
+;	FATWEN	R0 = cluster, R1 = value; write the FAT entry into every
+;		FAT copy -> R0 = 0 ok / 1 error. (Allocation primitive.)
+;	FATFREE	find a free cluster -> R0 = cluster number, 0 if none.
+;	(FATNX R0=cluster -> R0 = the entry's value is the FAT reader.)
 ;
 ; Directory attribute bits: 0x10 dir, 0x08 volume label, 0x0F long name.
 
@@ -386,6 +391,95 @@ FW3:	MOV	R3, R0
 FWEOF:	CLR	R0
 	RTS	PC
 
+; ---- write a FAT entry: R0 = cluster, R1 = value --------------------
+; Read-modify-write the entry into every FAT copy (they must stay in
+; sync). FAT entry N is the 16-bit LE word at FAT byte N*2. Uses FATBUF,
+; so it invalidates the dir cache. Returns R0 = 0 ok / 1 error.
+
+FATWEN:	MOV	R1, WVAL
+	MOV	R0, R4
+	SWAB	R4
+	BIC	#177400, R4		; sector offset = cluster >> 8
+	MOV	R0, R5
+	BIC	#177400, R5		; cluster & 0xFF
+	ASL	R5			; *2 = byte offset in the sector
+	MOV	R5, WBOFF
+	MOV	FATLBA, R0		; FAT-copy-1 sector LBA
+	MOV	FATLBA+2, R1
+	ADD	R4, R0
+	ADC	R1
+	MOV	R0, F1LO
+	MOV	R1, F1HI
+	MOV	#FATBUF, R2		; read it
+	JSR	PC, SDRD
+	CLR	DLOADED
+	TST	R0
+	BNE	FWEER
+	MOV	#FATBUF, R3		; patch the entry
+	ADD	WBOFF, R3
+	MOV	WVAL, (R3)
+	MOV	F1LO, R0		; write FAT copy 1 back
+	MOV	F1HI, R1
+	MOV	#FATBUF, R2
+	JSR	PC, SDWR
+	TST	R0
+	BNE	FWEER
+	CMP	NFATS, #2		; and copy 2, if present (= +SPFAT)
+	BLO	FWEOK
+	MOV	F1LO, R0
+	MOV	F1HI, R1
+	ADD	SPFAT, R0
+	ADC	R1
+	MOV	#FATBUF, R2
+	JSR	PC, SDWR
+	TST	R0
+	BNE	FWEER
+FWEOK:	CLR	R0
+	RTS	PC
+FWEER:	MOV	#1, R0
+	RTS	PC
+
+; ---- find a free cluster -> R0 = cluster number, or 0 if none -------
+; Scans the FAT a sector at a time (256 entries each) for a 0x0000
+; entry, skipping the two reserved entries. Uses FATBUF (invalidates the
+; dir cache). NOTE: bounded only by the FAT size, not the true cluster
+; count, so on a full volume it could return an entry past the last real
+; cluster; fine for a mostly-empty card. Proper bounding waits for the
+; totalSectors-based cluster count when file creation lands.
+
+FATFREE:CLR	R4			; FAT sector index
+FFR1:	CMP	R4, SPFAT
+	BHIS	FFRNONE
+	MOV	FATLBA, R0
+	MOV	FATLBA+2, R1
+	ADD	R4, R0
+	ADC	R1
+	MOV	#FATBUF, R2
+	JSR	PC, SDRD
+	CLR	DLOADED
+	TST	R0
+	BNE	FFRNONE
+	MOV	#FATBUF, R2		; scan 256 entries
+	CLR	R3			; entry index
+FFR2:	TST	(R2)			; free (0x0000)?
+	BNE	FFR3
+	TST	R4			; skip reserved clusters 0 and 1
+	BNE	FFRGOT
+	CMP	R3, #2
+	BLO	FFR3
+FFRGOT:	MOV	R4, R0			; cluster = sector*256 + index
+	SWAB	R0
+	ADD	R3, R0
+	RTS	PC
+FFR3:	ADD	#2, R2
+	INC	R3
+	CMP	R3, #^D256
+	BLO	FFR2
+	INC	R4
+	BR	FFR1
+FFRNONE:	CLR	R0
+	RTS	PC
+
 ; ---- little-endian readers from a (maybe odd) byte pointer R1 ------
 ; RDW -> R0 = 16-bit LE word.  RDB -> R0 = zero-extended byte.  Keep R1.
 
@@ -424,6 +518,10 @@ SRCHN:	.WORD	0		; FATOPN: name being searched for
 FCLUS:	.WORD	0		; open file: current cluster
 FSIZE:	.WORD	0, 0		;            bytes remaining (low, high)
 FSECI:	.WORD	0		;            sector within the cluster
+WVAL:	.WORD	0		; FATWEN: value being written
+WBOFF:	.WORD	0		;         byte offset in the FAT sector
+F1LO:	.WORD	0		;         FAT-copy-1 sector LBA (low)
+F1HI:	.WORD	0		;         FAT-copy-1 sector LBA (high)
 DENAME:	.BLKB	^D11		; current entry name (8.3, space padded)
 	.EVEN
 FATBUF:	.BLKB	^D512		; one sector: MBR / BPB / dir / FAT

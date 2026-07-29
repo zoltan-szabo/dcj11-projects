@@ -3,6 +3,27 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: FAT16 allocation primitives (2026-07-29)
+
+The shared foundation for file create/extend and delete: FATWEN (write
+a FAT entry into every FAT copy, read-modify-write; entry N at FAT byte
+N*2) and FATFREE (scan the FAT a sector at a time for a 0x0000 entry;
+bounded by the FAT size for now, not the true cluster count). FATNX is
+the entry reader. `fatatest.mac` tests them reversibly: FATFREE a
+cluster, confirm FATNX reads it as 0 (abort if not — never write a used
+cluster), FATWEN 0xFFFF, verify from BOTH copies (FAT2 read directly at
+FATLBA+SPFAT), then FATWEN 0 to restore. Hardware: on the card cluster 2
+was free; a pre/post raw dump of the FAT sector showed bytes 4-5 flip
+00 00 -> FF FF, both copies held FFFF, and restore returned 0000 — FAT
+unchanged.
+
+Debug note: the primitives worked first try; the failure was in the
+test — it called PMSG (which leaves R0 = the string's NUL) before saving
+FATNX's result, so it compared 0 instead of 0xFFFF. Same trap as the
+SDCMD R0-clobber earlier: a helper overwriting the register holding your
+result. The raw FAT-sector dump is what proved the write had persisted
+and pointed at the harness, not the driver.
+
 ## sdcard: FAT16 overwrite-in-place (2026-07-29)
 
 `fat16.mac` gained FATWR — the write twin of FATRD: it walks the open
