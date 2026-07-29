@@ -3,6 +3,22 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: SD power-up settling delay (cold-boot fix) (2026-07-29)
+
+After a cold power-off, the first card access failed at FATMNT
+("MOUNT FAILED") while a second run (after any other project had re-run
+the init) worked. SDINI reported success but the first 512-byte read
+failed - a classic SD cold-start: SDINI started clocking the card
+immediately, with no wait for the 3.3V rail (the breakout's AMS1117) and
+the card's internal power to stabilise, which the SD spec requires
+(>=1ms after Vdd stable, before the 74 wake clocks). On a warm reboot
+the rail is already up so it worked; cold, the init limped far enough to
+report ready but the read path wasn't solid. Fixed by a settling delay
+at the very start of SDINI (SDPWDLY outer count of ~65k-iteration inner
+loops) before the wake clocks. Verified: a genuine cold boot now mounts
+and lists on the first run. Not sdls-specific - it affected whichever
+project touched the card first.
+
 ## sdcard: reorganised into a proper project (2026-07-29)
 
 The directory had grown to ~45 files in one flat folder. Split it into

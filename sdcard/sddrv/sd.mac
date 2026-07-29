@@ -44,6 +44,12 @@ SDSCK	= 020			; PB4
 SDMOSI	= 040			; PB5
 SDMISO	= 100			; PB6
 
+; Power-up settling delay: outer count of ~65k-iteration inner loops run
+; before the first clock, so a cold card / 3.3V rail can stabilise. Bump
+; this if a COLD boot still fails the first mount (warm reboots are fine
+; either way).
+SDPWDLY	= ^D24
+
 ; ---- SPI line setup + primitives ------------------------------------
 
 SDPORT:	BIS	#SDCS, @#VIAORB		; CS idle high (deselected)
@@ -123,6 +129,10 @@ SDCM2:	MOV	(SP)+, R3
 ; ---- init ladder -> R0 = 0 ok / error code --------------------------
 
 SDINI:	JSR	PC, SDPORT
+	MOV	#SDPWDLY, R5		; power-up settling: the SD spec wants
+SDINP1:	MOV	#^O177777, R4		; Vdd stable + >=1ms BEFORE any clock.
+SDINP2:	SOB	R4, SDINP2		; On a cold boot the 3.3V rail and the
+	SOB	R5, SDINP1		; card are not ready yet, so wait first.
 	JSR	PC, SDCSH		; wake: >=74 clocks with CS HIGH
 	MOV	#^D10, R3		; 10*8 = 80 idle clocks
 SDIN0:	JSR	PC, SDIDLE
