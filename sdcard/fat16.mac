@@ -4,10 +4,10 @@
 ; geometry, and offers a directory iterator (root or any subdirectory),
 ; whole-file reading, overwrite-in-place, the FAT allocation primitives
 ; (free-cluster search + FAT-entry write), file create (multi-cluster
-; chain) + delete + rename in the root, and subdirectory create/remove
-; (FATMKD with . and .. / FATRMD with an emptiness guard). Writing files
-; inside a subdirectory is not done yet. 8.3 names only (long-name
-; entries skipped).
+; chain) + delete + rename in any directory (the root or a subdirectory,
+; growing the subdirectory's cluster chain when it fills), and
+; subdirectory create/remove (FATMKD with . and .. / FATRMD with an
+; emptiness guard). 8.3 names only (long-name entries skipped).
 ;
 ; All sector numbers are 32-bit LBAs, held as word pairs (low, high) and
 ; passed to sd.mac's SDRD in the R0:R1 register pair. Cluster arithmetic
@@ -49,6 +49,11 @@
 ;		found / 2 write error.
 ;	FATREN	R1 -> old 8.3 name, R2 -> new 8.3 name; rename in the root
 ;		-> R0 = 0 ok / 1 not found / 2 new name exists / 3 write.
+;	FATCREC/FATDELC/FATRENC  same as FATCRE/FATDEL/FATREN but act on
+;		the directory made current with FATCD (so files can be
+;		created, deleted, and renamed inside a subdirectory). The
+;		root wrappers are just "FATDIR0 then the core". FATCREC can
+;		grow the subdirectory's cluster chain when it fills up.
 ;	FATMKD	R1 -> 11-byte name; make a subdirectory in the root
 ;		(with . and .. entries) -> R0 = 0 ok / 2 exists / 3 no
 ;		cluster / 4 dir full / 6 write error.
@@ -506,13 +511,17 @@ FFR3:	ADD	#2, R2
 FFRNONE:	CLR	R0
 	RTS	PC
 
-; ---- find a free root-directory slot -------------------------------
-; Scans the fixed root region for an entry marked free (0x00 = never
-; used) or deleted (0xE5). On success FATBUF holds that sector, DSLBA/
-; DSHI = its LBA, DSOFF = the entry's byte offset in FATBUF. R0 = 0 ok /
-; 1 = directory full. Root only.
+; ---- find a free slot in the CURRENT directory ---------------------
+; Root: scan the fixed region (it cannot grow -> "dir full", code 4).
+; Subdirectory: walk the cluster chain; if no free (0x00) or deleted
+; (0xE5) slot is found, extend the chain by one freshly-zeroed cluster.
+; On success FATBUF holds the slot's sector, DSLBA/DSHI = its LBA, DSOFF
+; = the entry's byte offset in FATBUF. R0 = 0 ok / 3 no free cluster to
+; extend / 4 directory full (root) / 6 write error.
 
-FATSLOT:CLR	R4			; root sector index
+FATSLOT:TST	DMODE
+	BNE	FSLSUB
+	CLR	R4			; ---- root: the fixed region ----
 FSL1:	CMP	R4, RDSEC
 	BHIS	FSLNON
 	MOV	ROOTLBA, R0
@@ -539,12 +548,98 @@ FSL2:	CLR	R0
 	BLO	FSL2
 	INC	R4
 	BR	FSL1
-FSLGOT:	MOV	R2, R0			; byte offset in FATBUF
+FSLGOT:	MOV	R2, R0			; byte offset in FATBUF (both modes)
 	SUB	#FATBUF, R0
 	MOV	R0, DSOFF
 	CLR	R0
 	RTS	PC
-FSLNON:	MOV	#1, R0
+FSLNON:	MOV	#4, R0			; root directory full
+	RTS	PC
+
+FSLSUB:	MOV	DSTART, SLCUR		; ---- subdirectory: the chain ----
+	MOV	DSTART, SLPREV
+FSLC:	CMP	SLCUR, #2		; a valid data cluster?
+	BLO	FSLEXT
+	CMP	SLCUR, #177770		; 0xFFF8 end-of-chain -> extend
+	BHIS	FSLEXT
+	CLR	SLSEC
+FSLS:	CMP	SLSEC, SPCLUS
+	BHIS	FSLADV
+	MOV	SLCUR, R0
+	JSR	PC, CLBA
+	ADD	SLSEC, R0
+	ADC	R1
+	MOV	R0, DSLBA
+	MOV	R1, DSHI
+	MOV	#FATBUF, R2
+	JSR	PC, SDRD
+	CLR	DLOADED
+	TST	R0
+	BNE	FSLERR
+	MOV	#FATBUF, R2		; scan the 16 entries
+	CLR	R3
+FSLE:	CLR	R0
+	BISB	(R2), R0
+	BEQ	FSLGOT			; 0x00 never used
+	CMP	R0, #345		; 0xE5 deleted
+	BEQ	FSLGOT
+	ADD	#40, R2
+	INC	R3
+	CMP	R3, #^D16
+	BLO	FSLE
+	INC	SLSEC
+	BR	FSLS
+FSLADV:	MOV	SLCUR, SLPREV		; this cluster full; advance the chain
+	MOV	SLCUR, R0
+	JSR	PC, FATNX
+	MOV	R0, SLCUR
+	BR	FSLC
+
+FSLEXT:	JSR	PC, FATFREE		; extend: grab a new cluster, zero it
+	TST	R0
+	BEQ	FSLNSP
+	MOV	R0, SLNEW
+	MOV	#FATBUF, R2
+	MOV	#^D256, R3
+FSLEZ:	CLR	(R2)+
+	SOB	R3, FSLEZ
+	CLR	SLSEC
+FSLEZL:	MOV	SLNEW, R0
+	JSR	PC, CLBA
+	ADD	SLSEC, R0
+	ADC	R1
+	MOV	#FATBUF, R2
+	JSR	PC, SDWR
+	TST	R0
+	BNE	FSLERR
+	INC	SLSEC
+	CMP	SLSEC, SPCLUS
+	BLO	FSLEZL
+	MOV	SLPREV, R0		; link previous -> new
+	MOV	SLNEW, R1
+	JSR	PC, FATWEN
+	TST	R0
+	BNE	FSLERR
+	MOV	SLNEW, R0		; new -> end-of-chain
+	MOV	#177777, R1
+	JSR	PC, FATWEN
+	TST	R0
+	BNE	FSLERR
+	MOV	SLNEW, R0		; slot = new cluster, sector 0, offset 0
+	JSR	PC, CLBA
+	MOV	R0, DSLBA
+	MOV	R1, DSHI
+	MOV	#FATBUF, R2		; reload it (zeros) for the caller to patch
+	JSR	PC, SDRD
+	CLR	DLOADED
+	TST	R0
+	BNE	FSLERR
+	CLR	DSOFF
+	CLR	R0
+	RTS	PC
+FSLNSP:	MOV	#3, R0			; no free cluster to extend into
+	RTS	PC
+FSLERR:	MOV	#6, R0
 	RTS	PC
 
 ; ---- create a small file in the root directory ---------------------
@@ -554,11 +649,11 @@ FSLNON:	MOV	#1, R0
 ; Returns R0 = 0 ok / 2 already exists / 3 no free cluster / 4 dir full
 ; / 5 too big / 6 write error.
 
-FATCRE:	MOV	R1, CRNAME
+FATCRE:	JSR	PC, FATDIR0		; wrapper: create in the root
+FATCREC:MOV	R1, CRNAME		; core: create in the CURRENT directory
 	MOV	R2, CRDATA
 	MOV	R3, CRLEN
-	JSR	PC, FATDIR0		; create in (and search) the root
-	MOV	CRNAME, R1		; already present?
+	MOV	CRNAME, R1		; already present in this directory?
 	JSR	PC, FATOPN
 	TST	R0
 	BNE	FCR1
@@ -579,10 +674,11 @@ FCR2:	MOV	R0, CRCLUS
 FCR3:	JSR	PC, FATSLOT		; a place for the directory entry
 	TST	R0
 	BEQ	FCR4
-	MOV	CRCLUS, R0		; dir full: give the cluster back
+	MOV	R0, -(SP)		; keep FATSLOT's code (4 full / 3 / 6)
+	MOV	CRCLUS, R0		; give the file's cluster back
 	CLR	R1
 	JSR	PC, FATWEN
-	MOV	#4, R0
+	MOV	(SP)+, R0
 	RTS	PC
 FCR4:	MOV	#FATBUF, R3		; zero the 32-byte entry
 	ADD	DSOFF, R3
@@ -662,10 +758,8 @@ FCWNSP:	MOV	#7, R0			; ran out of space mid-file
 ; the entry's location (DELBA/DEHI/DEOFF) and first cluster (FCLUS) when
 ; FATOPN matched it. Returns R0 = 0 ok / 1 not found / 2 write error.
 
-FATDEL:	MOV	R1, CRNAME
-	JSR	PC, FATDIR0
-	MOV	CRNAME, R1
-	JSR	PC, FATOPN
+FATDEL:	JSR	PC, FATDIR0		; wrapper: delete from the root
+FATDELC:JSR	PC, FATOPN		; core: R1 = name, in the CURRENT dir
 	TST	R0
 	BEQ	FD1
 	MOV	#1, R0
@@ -711,8 +805,8 @@ FDERR:	MOV	#2, R0
 ; via DELBA/DEHI/DEOFF, recorded by the iterator when FATOPN matched).
 ; Root only. R0 = 0 ok / 1 not found / 2 target name exists / 3 write.
 
-FATREN:	MOV	R2, RNNEW		; stash the new-name pointer
-	JSR	PC, FATDIR0
+FATREN:	JSR	PC, FATDIR0		; wrapper: rename in the root
+FATRENC:MOV	R2, RNNEW		; core: rename in the CURRENT directory
 	JSR	PC, FATOPN		; R1 = old name; find it
 	TST	R0
 	BEQ	FRN1
@@ -721,9 +815,8 @@ FATREN:	MOV	R2, RNNEW		; stash the new-name pointer
 FRN1:	MOV	DELBA, RNLBA		; save the entry's location
 	MOV	DEHI, RNHI
 	MOV	DEOFF, RNOFF
-	MOV	RNNEW, R1		; new name must not already exist
-	JSR	PC, FATDIR0
-	JSR	PC, FATOPN
+	MOV	RNNEW, R1		; new name must not already exist here
+	JSR	PC, FATOPN		; (FATOPN rewinds the current dir itself)
 	TST	R0
 	BNE	FRN2
 	MOV	#2, R0
@@ -936,6 +1029,10 @@ F1HI:	.WORD	0		;         FAT-copy-1 sector LBA (high)
 DSLBA:	.WORD	0		; FATSLOT: slot sector LBA (low)
 DSHI:	.WORD	0		;          slot sector LBA (high)
 DSOFF:	.WORD	0		;          slot byte offset in FATBUF
+SLCUR:	.WORD	0		;          subdir walk: current cluster
+SLPREV:	.WORD	0		;                       last cluster before end
+SLSEC:	.WORD	0		;                       sector within the cluster
+SLNEW:	.WORD	0		;                       newly-allocated cluster
 CRNAME:	.WORD	0		; FATCRE: name pointer
 CRDATA:	.WORD	0		;         data buffer pointer
 CRLEN:	.WORD	0		;         length in bytes

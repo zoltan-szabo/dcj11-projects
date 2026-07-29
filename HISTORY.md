@@ -3,6 +3,30 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: FAT16 subdirectory writes (2026-07-29)
+
+Files can now be created, renamed, and deleted INSIDE a subdirectory,
+not just the root. The refactor: FATCRE/FATDEL/FATREN each became a thin
+root wrapper ("FATDIR0 then the core") plus a current-directory core
+FATCREC/FATDELC/FATRENC that acts on whatever FATCD last selected. The
+cores already used the DELBA/DEOFF/FCLUS the iterator records for any
+directory, so the only thing that had forced root was the leading
+FATDIR0 - and FATDIR0 leaves R1/R2/R3 untouched, so the wrapper falls
+straight through into the core. FATSLOT was generalized: root still
+scans the fixed region (can't grow -> "dir full"), a subdirectory walks
+its cluster chain and, if no free/deleted slot is found, extends the
+chain by one freshly-zeroed cluster (link previous->new, new->EOC). Two
+small tidy-ups fell out: FATSLOT now returns a uniform "dir full" = 4
+(both callers already remapped its old 1 to 4, so no observable change),
+and FATCRE propagates FATSLOT's real code (3/4/6) instead of always
+reporting 4. `fatstest.mac` drives the whole lifecycle in SUBDIR -
+create INSIDE.TXT, verify the data AND that it never appears in the
+root, rename, delete, then RMDIR the empty dir - and passed first run.
+It exercises both FATSLOT paths at once (root via FATMKD's parent entry,
+subdir via FATCREC). Directory-chain extension is code-correct but not
+hardware-exercised: a fresh subdir cluster holds ~1024 entries, too many
+to fill in a test.
+
 ## sdcard: FAT16 subdirectory removal (2026-07-29)
 
 FATRMD (R1 -> 11-byte name): the honest counterpart to the FATDEL
