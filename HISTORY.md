@@ -3,6 +3,20 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: FAT16 subdirectory creation (2026-07-29)
+
+FATMKD (R1 -> 11-byte name): the first structural write. Allocate a
+cluster, mark it EOC, zero the whole cluster (all 64 sectors - so no
+stale data from a previously-deleted file shows up as a phantom entry),
+write the mandatory "." (first cluster = itself) and ".." (first cluster
+= 0, the root) entries with attr 0x10 in the first sector, then add a
+directory entry (attr 0x10, size 0) in the root via FATSLOT. Root parent
+only. `fatmtest.mac` makes NEWDIR, confirms the directory bit, descends
+and checks the iterator returns "." then "..", then removes it - an
+empty directory is just a one-cluster chain, so FATDEL frees it (no
+emptiness guard yet; that's the job of a proper RMDIR). Hardware: clean
+first run, NEWDIR landed at cluster 3.
+
 ## sdcard: FAT16 rename (2026-07-29)
 
 FATREN (R1 old name, R2 new name): the smallest write op - FATOPN the
