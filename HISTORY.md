@@ -12,14 +12,16 @@ clusters). FATMNT now reads totalSectors (16-bit at 0x13, else 32-bit at
 0x20), computes countOfClusters = (totalSectors - dataOffset) / spc, and
 stores MAXCLUS = count + 1; FATFREE refuses any candidate above it. The
 gotcha: the first cut used the EIS DIV and fatgtest printed a cluster
-count of 0x3B for a 2 GB card - which is exactly the high word of the
-0x003B9AD0 total, i.e. the divide behaved like /0x10000. Rather than
-chase the DIV operand/register-pair semantics, switched to a shift:
+count of 0x3B for a 2 GB card - exactly the high word of the 0x003B9AD0
+total. A hardware probe (divtest) isolated why: PDP-11/J-11 DIV is a
+SIGNED divide, so a quotient over 32767 overflows and leaves the
+dividend register pair UNCHANGED - and 0x003B9AD0/64 = 61019 is well
+over 32767, so DIV left R4 = the high word 0x3B. Not an m11asm bug (the
+encoding was textbook-correct). Fixed by replacing DIV with a shift:
 sectorsPerCluster is always a power of two, so count = dataSectors >>
 log2(spc), done with the same CLC/ROR 32-bit shift idiom already used
 for rootDirSec. fatgtest then read totalSec 0x003B9AD0, spc 0x40, count
-0xEE63 - a valid FAT16 count (~2 GB / 32 KB). The added print of
-sectors/cluster is what made the DIV bug obvious. The full-volume
+0xEE63 - a valid FAT16 count (~2 GB / 32 KB). The full-volume
 refusal itself can't be exercised without filling the card, so it is
 code-correct but not hardware-tested; the normal in-range path is.
 
