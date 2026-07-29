@@ -3,6 +3,21 @@
 Detailed notes per change. Commit messages stay short; the long story
 lives here.
 
+## sdcard: FAT16 overwrite-in-place (2026-07-29)
+
+`fat16.mac` gained FATWR — the write twin of FATRD: it walks the open
+file's existing cluster chain and writes each sector with SDWR instead
+of reading. Overwrite ONLY: it never extends or allocates, so it stops
+at the file's current byte count and touches neither the FAT nor the
+directory (the size and cluster chain are unchanged, so no metadata
+update is needed). Re-open a file to switch between reading and writing
+it. `fatwtest.mac` opens TEST.TXT, overwrites it in place with a
+repeating same-length pattern, reads it back and verifies, and leaves
+the file changed. Hardware: "VERIFIED - readback matches", and TEST.TXT
+reads the PDP-11's text when the card is remounted on a PC. First real
+modification of a FAT volume from the J-11. Next up the write ladder:
+create/extend (free-cluster search + FAT/dir updates), then delete.
+
 ## sdcard: sector write verified (2026-07-29)
 
 `sdwtest.mac` exercises sd.mac's SDWR (untested until now) safely:

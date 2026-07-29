@@ -5,12 +5,13 @@ ladder and 512-byte sector read/write over the W65C22S VIA — plus a
 read-only FAT16 layer on top (mount, walk the directory tree including
 subdirectories, read files by following the cluster chain).
 
-**Status:** the raw block layer (init + sector **read** and **write**)
-and **read-only FAT16** (root *and* subdirectories) are all
-hardware-verified — the PDP-11 mounts a formatted card, recursively
-walks the directory tree, dumps a file, and round-trips a sector write
-through a scratch LBA. FAT is still read-only (no create/write yet) and
-8.3 names only (long names skipped).
+**Status:** the raw block layer (init + sector **read**/**write**) and
+FAT16 (mount, walk root *and* subdirectories, read files, and
+**overwrite a file in place**) are all hardware-verified — the PDP-11
+mounts a formatted card, walks the tree, dumps a file, round-trips a
+scratch-sector write, and overwrites `TEST.TXT` (verified on a PC
+afterward). FAT can overwrite existing data (same size, no FAT/dir
+change); it does not yet create, extend, or delete. 8.3 names only.
 
 ## Wiring (VIA port B)
 
@@ -48,8 +49,11 @@ A bare passive adapter would need external 3.3 V + level shifting.
 - `fattest.mac` — FAT bring-up: mount, print geometry, recursively walk
   the directory tree (indented, with sizes; depth/entry capped), then
   open and dump the first regular file as text.
-- `sdtest.prj` / `fattest.prj` / `sdwtest.prj` — J11Terminal projects
-  (origin 1000).
+- `fatwtest.mac` — FAT overwrite test: rewrite `TEST.TXT` in place with
+  a same-length pattern via `FATWR`, read back, verify (leaves the file
+  changed so it can be confirmed on a PC).
+- `sdtest.prj` / `sdwtest.prj` / `fattest.prj` / `fatwtest.prj` —
+  J11Terminal projects (origin 1000).
 
 ## Using it
 

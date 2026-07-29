@@ -27,6 +27,11 @@
 ;		Sets up the file for FATRD.
 ;	FATRD	R2 -> 512-byte buffer; read the next sector of the open
 ;		file -> R0 = byte count in it (0 = end of file).
+;	FATWR	R2 -> 512-byte buffer; OVERWRITE the next sector of the
+;		open file in place -> R0 = bytes written (0 = done). Never
+;		extends/allocates; stops at the file's existing size, so
+;		the FAT and directory are left untouched. Re-open (FATOPN)
+;		before switching between reading and writing a file.
 ;
 ; Directory attribute bits: 0x10 dir, 0x08 volume label, 0x0F long name.
 
@@ -331,6 +336,54 @@ FR2:	SUB	R3, FSIZE		; remaining -= count (32-bit)
 FR3:	MOV	R3, R0
 	RTS	PC
 FREOF:	CLR	R0
+	RTS	PC
+
+; ---- overwrite the next sector of the open file: R2 -> buffer -------
+; The write twin of FATRD: writes one sector of the caller's data over
+; the file's existing cluster chain and advances. OVERWRITE IN PLACE
+; ONLY - it never extends the file or allocates, so it stops when the
+; file's byte count is used up (nothing here touches the FAT or the
+; directory). SDWR writes a full 512-byte sector; the caller's buffer is
+; written whole, and the meaningful count (min 512, remaining) is what's
+; returned and charged against the size. Returns R0 = bytes written
+; (0 = done, or a write/chain error - check FSIZE: 0 = clean finish).
+
+FATWR:	TST	FSIZE			; remaining bytes == 0 -> done
+	BNE	FW1
+	TST	FSIZE+2
+	BEQ	FWEOF
+FW1:	CMP	FCLUS, #2		; a valid data cluster?
+	BLO	FWEOF
+	CMP	FCLUS, #177770		; 0xFFF8 end-of-chain
+	BHIS	FWEOF
+	MOV	R2, -(SP)		; write buf to cluster sector FSECI
+	MOV	FCLUS, R0
+	JSR	PC, CLBA
+	ADD	FSECI, R0
+	ADC	R1
+	MOV	(SP)+, R2
+	JSR	PC, SDWR
+	TST	R0
+	BNE	FWEOF			; write error -> stop (FSIZE stays > 0)
+	TST	FSIZE+2			; bytes this sector = min(512, left)
+	BNE	FWFULL
+	CMP	FSIZE, #^D512
+	BLO	FWPART
+FWFULL:	MOV	#^D512, R3
+	BR	FW2
+FWPART:	MOV	FSIZE, R3
+FW2:	SUB	R3, FSIZE		; remaining -= count (32-bit)
+	SBC	FSIZE+2
+	INC	FSECI			; next sector; cross cluster if needed
+	CMP	FSECI, SPCLUS
+	BLO	FW3
+	CLR	FSECI
+	MOV	FCLUS, R0
+	JSR	PC, FATNX
+	MOV	R0, FCLUS
+FW3:	MOV	R3, R0
+	RTS	PC
+FWEOF:	CLR	R0
 	RTS	PC
 
 ; ---- little-endian readers from a (maybe odd) byte pointer R1 ------
